@@ -573,6 +573,145 @@ def load_markdown(path: Path) -> Tuple[str, Dict[str, Any]]:
     return content, metadata
 
 
+def _detect_csv_delimiter(content: str) -> str:
+    """Detect the most likely delimiter in CSV content.
+
+    Tests common delimiters and returns the one that produces the most
+    consistent column count across the first few rows.
+
+    Args:
+        content: Raw CSV content as string.
+
+    Returns:
+        Detected delimiter character.
+    """
+    import csv
+
+    delimiters = [",", ";", "\t", "|"]
+    best_delimiter = ","
+    best_score = 0
+
+    # Get first 10 lines for analysis
+    lines = content.split("\n")[:10]
+    sample = "\n".join(lines)
+
+    for delimiter in delimiters:
+        try:
+            reader = csv.reader(sample.split("\n"), delimiter=delimiter)
+            rows = list(reader)
+
+            if len(rows) < 2:
+                continue
+
+            # Score based on column count consistency and number of columns
+            col_counts = [len(row) for row in rows if row]
+            if not col_counts:
+                continue
+
+            # Prefer delimiters that give consistent column counts > 1
+            avg_cols = sum(col_counts) / len(col_counts)
+            consistency = 1 - (max(col_counts) - min(col_counts)) / max(max(col_counts), 1)
+
+            score = avg_cols * consistency
+
+            if avg_cols > 1 and score > best_score:
+                best_score = score
+                best_delimiter = delimiter
+
+        except Exception:
+            continue
+
+    return best_delimiter
+
+
+def load_csv(path: Path) -> Tuple[str, Dict[str, Any]]:
+    """Load CSV/TSV file with delimiter detection.
+
+    Automatically detects the delimiter (comma, semicolon, tab, or pipe)
+    and extracts text in a format consistent with Excel loading.
+
+    Args:
+        path: Path to the CSV/TSV file.
+
+    Returns:
+        Tuple of (extracted_text, metadata_dict).
+
+    Raises:
+        DocumentParseError: If the file cannot be read or is malformed.
+    """
+    import csv
+
+    metadata: Dict[str, Any] = {}
+    rows_text: list[str] = []
+    total_rows = 0
+    max_columns = 0
+
+    # Read file content with encoding fallback
+    content: Optional[str] = None
+    encoding_used = "utf-8"
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        # Try fallback encodings
+        for encoding in ["cp1252", "iso-8859-1", "latin-1"]:
+            try:
+                content = path.read_text(encoding=encoding)
+                encoding_used = encoding
+                metadata["encoding_fallback"] = encoding
+                logger.warning(f"Used fallback encoding {encoding} for: {path}")
+                break
+            except UnicodeDecodeError:
+                continue
+
+    if content is None:
+        logger.error(f"Failed to decode CSV file with any encoding: {path}")
+        raise DocumentParseError("Unable to decode CSV file", path)
+
+    # Detect delimiter
+    delimiter = _detect_csv_delimiter(content)
+    metadata["detected_delimiter"] = delimiter
+
+    # Parse CSV
+    try:
+        reader = csv.reader(content.split("\n"), delimiter=delimiter)
+
+        for row in reader:
+            # Skip completely empty rows
+            if not any(cell.strip() for cell in row):
+                continue
+
+            total_rows += 1
+            max_columns = max(max_columns, len(row))
+
+            # Format row as pipe-separated values (consistent with Excel)
+            cell_values = [cell.strip() for cell in row]
+            rows_text.append(" | ".join(cell_values))
+
+    except csv.Error as e:
+        logger.error(f"CSV parsing error in {path}: {e}")
+        raise DocumentParseError(f"CSV parsing error: {e}", path)
+    except Exception as e:
+        logger.error(f"Failed to read CSV file: {path} - {e}")
+        raise DocumentParseError(f"CSV read error: {e}", path)
+
+    # Build output text with sheet marker (consistent with Excel format)
+    sheet_name = path.stem
+    if rows_text:
+        text = f"[SHEET:{sheet_name}]\n" + "\n".join(rows_text)
+    else:
+        text = f"[SHEET:{sheet_name}]"
+
+    # Set metadata
+    metadata["title"] = path.stem
+    metadata["total_rows"] = total_rows
+    metadata["total_columns"] = max_columns
+    metadata["sheet_names"] = [sheet_name]
+    metadata["sheet_count"] = 1
+
+    return text, metadata
+
+
 def load_excel(path: Path) -> Tuple[str, Dict[str, Any]]:
     """Load Excel file (.xlsx, .xls) with multi-sheet support.
 
@@ -720,6 +859,8 @@ HANDLERS: Dict[str, Callable[[Path], Tuple[str, Dict[str, Any]]]] = {
     ".docx": load_docx,
     ".xlsx": load_excel,
     ".xls": load_excel,
+    ".csv": load_csv,
+    ".tsv": load_csv,
     ".md": load_markdown,
     ".txt": load_markdown,
 }
