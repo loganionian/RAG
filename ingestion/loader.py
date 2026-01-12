@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -245,6 +247,189 @@ def load_docx(path: Path) -> Tuple[str, Dict[str, Any]]:
         raise DocumentParseError(f"DOCX read error: {e}", path)
 
     return "\n\n".join(content_parts), metadata
+
+
+def _extract_doc_with_antiword(path: Path) -> Optional[str]:
+    """Extract text from legacy .doc file using antiword CLI tool.
+
+    Args:
+        path: Path to the .doc file.
+
+    Returns:
+        Extracted text if successful, None if antiword is not available.
+
+    Raises:
+        DocumentParseError: If antiword fails to process the file.
+    """
+    antiword_path = shutil.which("antiword")
+    if not antiword_path:
+        return None
+
+    try:
+        result = subprocess.run(
+            [antiword_path, str(path)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            return result.stdout
+        else:
+            logger.warning(f"antiword failed for {path}: {result.stderr}")
+            raise DocumentParseError(f"antiword error: {result.stderr}", path)
+    except subprocess.TimeoutExpired:
+        raise DocumentParseError("antiword timed out processing file", path)
+    except FileNotFoundError:
+        return None
+
+
+def _extract_doc_with_win32com(path: Path) -> Optional[Tuple[str, Dict[str, Any]]]:
+    """Extract text from legacy .doc file using Windows COM automation.
+
+    Requires Microsoft Word to be installed on the system.
+
+    Args:
+        path: Path to the .doc file.
+
+    Returns:
+        Tuple of (text, metadata) if successful, None if COM is not available.
+
+    Raises:
+        DocumentParseError: If Word fails to process the file.
+    """
+    try:
+        import win32com.client
+        import pythoncom
+    except ImportError:
+        return None
+
+    word = None
+    doc = None
+    try:
+        pythoncom.CoInitialize()
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+
+        doc = word.Documents.Open(str(path.resolve()), ReadOnly=True)
+
+        # Extract text from the document
+        text = doc.Content.Text
+
+        # Extract metadata from built-in properties
+        metadata = {}
+        try:
+            props = doc.BuiltInDocumentProperties
+            prop_mapping = {
+                "Title": "title",
+                "Author": "author",
+                "Subject": "subject",
+                "Keywords": "keywords",
+                "Comments": "comments",
+                "Last Author": "last_modified_by",
+            }
+            for word_prop, meta_key in prop_mapping.items():
+                try:
+                    value = props(word_prop).Value
+                    if value:
+                        metadata[meta_key] = str(value)
+                except Exception:
+                    pass
+
+            # Extract dates
+            try:
+                created = props("Creation Date").Value
+                if created:
+                    metadata["creation_date"] = created.isoformat() if hasattr(created, "isoformat") else str(created)
+            except Exception:
+                pass
+
+            try:
+                modified = props("Last Save Time").Value
+                if modified:
+                    metadata["modification_date"] = modified.isoformat() if hasattr(modified, "isoformat") else str(modified)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug(f"Could not extract metadata from .doc: {e}")
+
+        return text, metadata
+
+    except Exception as e:
+        logger.error(f"Win32COM failed for {path}: {e}")
+        raise DocumentParseError(f"Win32COM error: {e}", path)
+    finally:
+        if doc:
+            try:
+                doc.Close(False)
+            except Exception:
+                pass
+        if word:
+            try:
+                word.Quit()
+            except Exception:
+                pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+
+def load_doc(path: Path) -> Tuple[str, Dict[str, Any]]:
+    """Load legacy .doc (Word 97-2003) file with multiple extraction strategies.
+
+    Attempts extraction in the following order:
+    1. antiword CLI tool (cross-platform, requires installation)
+    2. Windows COM automation (Windows only, requires Microsoft Word)
+
+    Args:
+        path: Path to the .doc file.
+
+    Returns:
+        Tuple of (extracted_text, metadata_dict).
+
+    Raises:
+        DocumentParseError: If the file cannot be read by any available method.
+    """
+    metadata: Dict[str, Any] = {}
+
+    # Strategy 1: Try antiword (cross-platform)
+    try:
+        text = _extract_doc_with_antiword(path)
+        if text is not None:
+            logger.debug(f"Extracted .doc with antiword: {path}")
+            metadata["extraction_method"] = "antiword"
+            # Fallback title from filename
+            metadata["title"] = path.stem
+            return text, metadata
+    except DocumentParseError:
+        raise
+
+    # Strategy 2: Try Windows COM automation
+    try:
+        result = _extract_doc_with_win32com(path)
+        if result is not None:
+            text, com_metadata = result
+            metadata.update(com_metadata)
+            metadata["extraction_method"] = "win32com"
+            # Fallback title from filename if not in metadata
+            if "title" not in metadata:
+                metadata["title"] = path.stem
+            return text, metadata
+    except DocumentParseError:
+        raise
+
+    # No extraction method available
+    error_msg = (
+        "Cannot extract text from legacy .doc file. "
+        "Please install one of the following:\n"
+        "  - antiword: Cross-platform CLI tool (https://www.winfield.demon.nl/)\n"
+        "    Windows: Download from http://antiword.cjb.net/ or use chocolatey: choco install antiword\n"
+        "    Linux: apt-get install antiword / yum install antiword\n"
+        "    macOS: brew install antiword\n"
+        "  - pywin32: Windows only, requires Microsoft Word (pip install pywin32)"
+    )
+    logger.error(f"No extraction method available for .doc: {path}")
+    raise DocumentParseError(error_msg, path)
 
 
 def _parse_yaml_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
@@ -531,6 +716,7 @@ def load_excel(path: Path) -> Tuple[str, Dict[str, Any]]:
 
 HANDLERS: Dict[str, Callable[[Path], Tuple[str, Dict[str, Any]]]] = {
     ".pdf": load_pdf,
+    ".doc": load_doc,
     ".docx": load_docx,
     ".xlsx": load_excel,
     ".xls": load_excel,

@@ -1,4 +1,4 @@
-"""Unit tests for document loaders (PDF, DOCX, Markdown)."""
+"""Unit tests for document loaders (PDF, DOC, DOCX, Markdown)."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -9,8 +9,10 @@ import pytest
 
 from ingestion.loader import (
     DocumentParseError,
+    _extract_doc_with_antiword,
     _parse_pdf_date,
     _parse_yaml_frontmatter,
+    load_doc,
     load_docx,
     load_markdown,
     load_pdf,
@@ -263,6 +265,127 @@ class TestDOCXLoader:
 
             assert metadata.get("has_headers") is True
             assert metadata.get("has_footers") is True
+
+
+class TestDOCLoader:
+    """Tests for legacy .doc (Word 97-2003) parser functionality."""
+
+    def test_load_doc_with_antiword_success(self, tmp_path: Path):
+        """Test .doc file extraction with antiword succeeds."""
+        with patch("shutil.which") as mock_which, \
+             patch("subprocess.run") as mock_run:
+            mock_which.return_value = "/usr/bin/antiword"
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="This is the document content.\n\nSecond paragraph.",
+            )
+
+            doc_path = tmp_path / "test.doc"
+            doc_path.touch()
+
+            text, metadata = load_doc(doc_path)
+
+            assert "This is the document content." in text
+            assert "Second paragraph" in text
+            assert metadata["extraction_method"] == "antiword"
+            assert metadata["title"] == "test"
+
+    def test_load_doc_antiword_not_found_falls_back(self, tmp_path: Path):
+        """Test .doc extraction falls back when antiword is not available."""
+        with patch("shutil.which") as mock_which, \
+             patch("ingestion.loader._extract_doc_with_win32com") as mock_win32:
+            mock_which.return_value = None  # antiword not found
+            mock_win32.return_value = ("Content from Word", {"title": "My Doc"})
+
+            doc_path = tmp_path / "test.doc"
+            doc_path.touch()
+
+            text, metadata = load_doc(doc_path)
+
+            assert text == "Content from Word"
+            assert metadata["title"] == "My Doc"
+            assert metadata["extraction_method"] == "win32com"
+
+    def test_load_doc_antiword_fails_with_error(self, tmp_path: Path):
+        """Test .doc extraction raises error when antiword fails."""
+        with patch("shutil.which") as mock_which, \
+             patch("subprocess.run") as mock_run:
+            mock_which.return_value = "/usr/bin/antiword"
+            mock_run.return_value = MagicMock(
+                returncode=1,
+                stderr="Error: not a Word document",
+            )
+
+            doc_path = tmp_path / "invalid.doc"
+            doc_path.touch()
+
+            with pytest.raises(DocumentParseError) as exc_info:
+                load_doc(doc_path)
+
+            assert "antiword error" in str(exc_info.value)
+
+    def test_load_doc_antiword_timeout(self, tmp_path: Path):
+        """Test .doc extraction handles antiword timeout."""
+        import subprocess
+
+        with patch("shutil.which") as mock_which, \
+             patch("subprocess.run") as mock_run:
+            mock_which.return_value = "/usr/bin/antiword"
+            mock_run.side_effect = subprocess.TimeoutExpired("antiword", 60)
+
+            doc_path = tmp_path / "large.doc"
+            doc_path.touch()
+
+            with pytest.raises(DocumentParseError) as exc_info:
+                load_doc(doc_path)
+
+            assert "timed out" in str(exc_info.value)
+
+    def test_load_doc_no_extraction_method_available(self, tmp_path: Path):
+        """Test .doc extraction raises helpful error when no method available."""
+        with patch("shutil.which") as mock_which, \
+             patch("ingestion.loader._extract_doc_with_win32com") as mock_win32:
+            mock_which.return_value = None  # antiword not found
+            mock_win32.return_value = None  # win32com not available
+
+            doc_path = tmp_path / "test.doc"
+            doc_path.touch()
+
+            with pytest.raises(DocumentParseError) as exc_info:
+                load_doc(doc_path)
+
+            error_msg = str(exc_info.value)
+            assert "antiword" in error_msg
+            assert "pywin32" in error_msg
+
+    def test_load_doc_title_fallback_to_filename(self, tmp_path: Path):
+        """Test .doc uses filename as title fallback."""
+        with patch("shutil.which") as mock_which, \
+             patch("subprocess.run") as mock_run:
+            mock_which.return_value = "/usr/bin/antiword"
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout="Document content",
+            )
+
+            doc_path = tmp_path / "my_report_2024.doc"
+            doc_path.touch()
+
+            text, metadata = load_doc(doc_path)
+
+            assert metadata["title"] == "my_report_2024"
+
+    def test_extract_doc_with_antiword_returns_none_when_not_installed(self, tmp_path: Path):
+        """Test _extract_doc_with_antiword returns None when antiword is not installed."""
+        with patch("shutil.which") as mock_which:
+            mock_which.return_value = None
+
+            doc_path = tmp_path / "test.doc"
+            doc_path.touch()
+
+            result = _extract_doc_with_antiword(doc_path)
+
+            assert result is None
 
 
 class TestMarkdownLoader:

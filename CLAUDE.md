@@ -61,7 +61,7 @@ BASE_URL=https://your-llm-api-endpoint
 
 ### Data Flow
 ```
-data/raw/ (PDF, DOCX, XLSX, XLS, MD, TXT)
+data/raw/ (PDF, DOC, DOCX, XLSX, XLS, MD, TXT)
     → [ingestion]  → data/processed/chunks/*.jsonl + manifest.json + failures.json + ingestion-report.json
     → [indexing]   → data/vectorstore/ (Chroma)
     → [query]      → Top-k semantic matches
@@ -71,7 +71,7 @@ data/raw/ (PDF, DOCX, XLSX, XLS, MD, TXT)
 ### Package Structure
 
 **ingestion/** - Document parsing and chunking
-- `loader.py`: Multi-format document loading (PDF via PyPDF2, DOCX via python-docx, Excel via openpyxl)
+- `loader.py`: Multi-format document loading (PDF via PyPDF2, DOC via antiword/win32com, DOCX via python-docx, Excel via openpyxl)
 - `chunker.py`: Paragraph-aware chunking (~400 tokens, 80-token overlap)
 - `storage.py`: JSONL chunk persistence, manifest tracking, failure/report storage
 - `pipeline.py`: `IngestionPipeline` orchestrates discover → load → chunk → store
@@ -128,6 +128,49 @@ python -m scripts.download_model --output-dir models
 ```bash
 set EMBEDDING_MODEL_PATH=models/sentence-transformers_all-MiniLM-L6-v2
 ```
+
+### Legacy DOC File Support
+
+The ingestion pipeline supports legacy Word documents (.doc format, Word 97-2003) with multiple extraction strategies:
+
+**Supported Formats:**
+- `.doc` - Microsoft Word 97-2003 (Legacy binary format)
+- `.docx` - Microsoft Word 2007+ (Office Open XML) - already supported via python-docx
+
+**Extraction Methods (in order of priority):**
+
+1. **antiword** (Cross-platform, recommended)
+   - Command-line tool that extracts text from .doc files
+   - Installation:
+     - Windows: `choco install antiword` or download from http://antiword.cjb.net/
+     - Linux: `apt-get install antiword` or `yum install antiword`
+     - macOS: `brew install antiword`
+
+2. **win32com** (Windows only)
+   - Uses Microsoft Word via COM automation
+   - Requires Microsoft Word to be installed
+   - Installation: `pip install pywin32`
+
+**Metadata Extracted:**
+- `title`: Document title (or filename fallback)
+- `author`: Document author
+- `subject`: Document subject
+- `keywords`: Document keywords
+- `creation_date` / `modification_date`: Timestamps
+- `extraction_method`: Which method was used (`antiword` or `win32com`)
+
+**Example Usage:**
+```bash
+# Ingest DOC files along with other documents
+python -m scripts.ingest --input-dir data/raw --output-dir data/processed --verbose
+
+# The pipeline automatically detects and processes .doc files
+```
+
+**Error Handling:**
+- If no extraction method is available, a helpful error message is displayed with installation instructions
+- Corrupted files raise `DocumentParseError`
+- Timeout handling for large files (60 second limit for antiword)
 
 ### Excel File Support
 
