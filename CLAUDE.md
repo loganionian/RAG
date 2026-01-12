@@ -61,7 +61,7 @@ BASE_URL=https://your-llm-api-endpoint
 
 ### Data Flow
 ```
-data/raw/ (PDF, DOC, DOCX, XLSX, XLS, MD, TXT)
+data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
     → [ingestion]  → data/processed/chunks/*.jsonl + manifest.json + failures.json + ingestion-report.json
     → [indexing]   → data/vectorstore/ (Chroma)
     → [query]      → Top-k semantic matches
@@ -71,12 +71,13 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, MD, TXT)
 ### Package Structure
 
 **ingestion/** - Document parsing and chunking
-- `loader.py`: Multi-format document loading (PDF via PyPDF2, DOC via antiword/win32com, DOCX via python-docx, Excel via openpyxl)
+- `loader.py`: Multi-format document loading (PDF via PyPDF2, DOC via antiword/win32com, DOCX via python-docx, Excel via openpyxl, CSV/TSV via csv module)
 - `chunker.py`: Paragraph-aware chunking (~400 tokens, 80-token overlap)
 - `storage.py`: JSONL chunk persistence, manifest tracking, failure/report storage
-- `pipeline.py`: `IngestionPipeline` orchestrates discover → load → chunk → store
+- `pipeline.py`: `IngestionPipeline` orchestrates discover → load → classify → chunk → store
 - `normalizer.py`: Configurable text normalization with `TextNormalizer` and `NormalizationConfig`
 - `normalization_rules.py`: Pre-defined regex patterns for page numbers, boilerplate, special chars
+- `spreadsheet_classifier.py`: Heuristic-based classification of spreadsheets as tabular vs report-like
 - `models.py`: Data models (`Document`, `DocumentChunk`, `FailureInfo`)
 
 **indexing/** - Vector database operations
@@ -212,6 +213,91 @@ python -m scripts.ingest --input-dir data/raw --output-dir data/processed --verb
 - Corrupted files raise `DocumentParseError`
 - Password-protected workbooks are detected and reported
 - Partial extraction continues if individual sheets fail
+
+### CSV/TSV File Support
+
+The ingestion pipeline supports CSV and TSV files with automatic delimiter detection:
+
+**Supported Formats:**
+- `.csv` - Comma-separated values (with automatic delimiter detection)
+- `.tsv` - Tab-separated values
+
+**Delimiter Detection:**
+- Automatically detects: comma (`,`), semicolon (`;`), tab (`\t`), pipe (`|`)
+- Uses consistency scoring across first 10 rows to choose best delimiter
+- Falls back to comma if no multi-column delimiter is detected
+
+**Output Format:**
+- Content prefixed with `[SHEET:filename]` marker (consistent with Excel format)
+- Rows converted to pipe-separated values (e.g., `Col1 | Col2 | Col3`)
+- Empty rows are skipped
+- Cell values are trimmed of whitespace
+
+**Metadata Extracted:**
+- `title`: From filename
+- `detected_delimiter`: The delimiter used for parsing
+- `total_rows`: Number of non-empty rows
+- `total_columns`: Maximum column count
+- `sheet_names`: List containing the filename (for consistency with Excel)
+- `sheet_count`: Always 1 for CSV files
+
+**Encoding Handling:**
+- Primary: UTF-8
+- Fallback chain: cp1252 → iso-8859-1 → latin-1
+- Encoding used is recorded in metadata if fallback was needed
+
+**Example Usage:**
+```bash
+# Ingest CSV files along with other documents
+python -m scripts.ingest --input-dir data/raw --output-dir data/processed --verbose
+
+# The pipeline automatically detects and processes .csv and .tsv files
+```
+
+### Spreadsheet Classification
+
+The pipeline can classify CSV/Excel files as either **tabular** (structured data) or **report-like** (unstructured document) to enable appropriate downstream processing:
+
+**Classification Heuristics:**
+- **Row count**: Files with 10+ rows suggest tabular data
+- **Column count**: 2-50 columns is typical for tabular data
+- **Numeric ratio**: >30% numeric cells suggests tabular
+- **Long text ratio**: Cells >200 chars suggest report-like content
+- **Empty cell ratio**: Sparse data (>50% empty) suggests report-like
+
+**CLI Usage:**
+```bash
+# Enable spreadsheet classification
+python -m scripts.ingest --input-dir data/raw --output-dir data/processed --classify-spreadsheets
+
+# Customize classification thresholds
+python -m scripts.ingest --classify-spreadsheets --min-rows-tabular 5 --numeric-ratio 0.4
+
+# Available options:
+#   --classify-spreadsheets     Enable classification
+#   --min-rows-tabular N        Minimum rows for tabular (default: 10)
+#   --numeric-ratio N           Minimum numeric ratio (default: 0.3)
+#   --long-text-threshold N     Character threshold for long text (default: 200)
+#   --max-columns-tabular N     Maximum columns for tabular (default: 50)
+```
+
+**Classification Metadata:**
+When enabled, the following metadata is added to spreadsheet documents:
+- `spreadsheet_classification`: Either "tabular" or "report_like"
+- `classification_confidence`: Score from 0.0 to 1.0
+- `classification_reasons`: List of human-readable reasons
+- `classification_metrics`: Computed metrics (row_count, numeric_ratio, etc.)
+
+**Override Patterns:**
+Classification can be overridden programmatically using filename patterns:
+```python
+config = SpreadsheetClassificationConfig(
+    override_patterns=[
+        {"pattern": "*_report.xlsx", "classification": "report_like"},
+        {"pattern": "*_data.csv", "classification": "tabular"},
+    ]
+)
+```
 
 ### Text Normalization
 

@@ -8,6 +8,7 @@ from typing import Optional
 
 from ingestion.normalizer import NormalizationConfig, TextNormalizer
 from ingestion.pipeline import IngestionPipeline, PipelineConfig
+from ingestion.spreadsheet_classifier import SpreadsheetClassificationConfig
 from ingestion.storage import StorageManager
 
 
@@ -73,6 +74,40 @@ def parse_args() -> argparse.Namespace:
         "--no-remove-boilerplate",
         action="store_true",
         help="Disable removal of boilerplate text (confidential, copyright, etc.).",
+    )
+
+    # Spreadsheet classification arguments
+    classify_group = parser.add_argument_group(
+        "spreadsheet classification", "Spreadsheet classification options"
+    )
+    classify_group.add_argument(
+        "--classify-spreadsheets",
+        action="store_true",
+        help="Enable tabular vs report-like classification for CSV/Excel files.",
+    )
+    classify_group.add_argument(
+        "--min-rows-tabular",
+        type=int,
+        default=10,
+        help="Minimum row count to classify as tabular (default: 10).",
+    )
+    classify_group.add_argument(
+        "--numeric-ratio",
+        type=float,
+        default=0.3,
+        help="Minimum numeric cell ratio for tabular (default: 0.3 = 30%%).",
+    )
+    classify_group.add_argument(
+        "--long-text-threshold",
+        type=int,
+        default=200,
+        help="Character count threshold for long text detection (default: 200).",
+    )
+    classify_group.add_argument(
+        "--max-columns-tabular",
+        type=int,
+        default=50,
+        help="Maximum column count for tabular classification (default: 50).",
     )
 
     return parser.parse_args()
@@ -142,6 +177,26 @@ def build_normalization_config(args: argparse.Namespace) -> Optional[Normalizati
     return config
 
 
+def build_classification_config(args: argparse.Namespace) -> Optional[SpreadsheetClassificationConfig]:
+    """Build a SpreadsheetClassificationConfig from command line arguments.
+
+    Args:
+        args: Parsed command line arguments.
+
+    Returns:
+        SpreadsheetClassificationConfig or None if classification is disabled.
+    """
+    if not args.classify_spreadsheets:
+        return None
+
+    return SpreadsheetClassificationConfig(
+        min_rows_for_tabular=args.min_rows_tabular,
+        numeric_ratio_threshold=args.numeric_ratio,
+        long_text_threshold=args.long_text_threshold,
+        max_columns_for_tabular=args.max_columns_tabular,
+    )
+
+
 def configure_logging(verbose: bool) -> None:
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(level=level, format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
@@ -172,6 +227,14 @@ def main() -> int:
     else:
         logging.info("Text normalization disabled")
 
+    # Build spreadsheet classification configuration
+    classification_config = build_classification_config(args)
+
+    if classification_config is not None:
+        logging.info("Spreadsheet classification enabled")
+    else:
+        logging.info("Spreadsheet classification disabled")
+
     config = PipelineConfig(
         input_dir=Path(args.input_dir),
         output_dir=output_dir,
@@ -180,6 +243,7 @@ def main() -> int:
         fail_fast=args.fail_fast,
         normalization_config=normalization_config,
         cleanup_deleted=args.cleanup,
+        spreadsheet_classification_config=classification_config,
     )
 
     pipeline = IngestionPipeline(config)

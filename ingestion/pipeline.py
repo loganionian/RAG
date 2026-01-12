@@ -7,10 +7,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
+import pandas as pd
+
 from .chunker import chunk_document
 from .loader import DocumentLoader, UnsupportedDocumentError, discover_documents
-from .models import FailureInfo
+from .models import Document, FailureInfo
 from .normalizer import NormalizationConfig, TextNormalizer
+from .spreadsheet_classifier import (
+    ClassificationResult,
+    SpreadsheetClassificationConfig,
+    classify_dataframe,
+)
 from .storage import StorageManager
 
 logger = logging.getLogger(__name__)
@@ -28,6 +35,8 @@ class PipelineConfig:
         fail_fast: Stop on first failure instead of continuing.
         normalization_config: Optional configuration for text normalization.
         cleanup_deleted: Remove orphaned docs whose source files were deleted.
+        spreadsheet_classification_config: Optional config for classifying
+            spreadsheets as tabular vs report-like.
     """
 
     input_dir: Path
@@ -37,6 +46,7 @@ class PipelineConfig:
     fail_fast: bool = False
     normalization_config: Optional[NormalizationConfig] = field(default=None)
     cleanup_deleted: bool = False
+    spreadsheet_classification_config: Optional[SpreadsheetClassificationConfig] = field(default=None)
 
 
 @dataclass
@@ -50,6 +60,9 @@ class PipelineResult:
     end_time: str
     duration_seconds: float
     cleaned_up: int = 0
+
+
+SPREADSHEET_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls"}
 
 
 class IngestionPipeline:
@@ -74,6 +87,64 @@ class IngestionPipeline:
 
         self.loader = DocumentLoader(config.input_dir, normalizer=normalizer)
         self.storage = StorageManager(config.output_dir)
+
+    def _is_spreadsheet(self, document: Document) -> bool:
+        """Check if document is a spreadsheet type.
+
+        Args:
+            document: Document to check.
+
+        Returns:
+            True if document is CSV, TSV, or Excel format.
+        """
+        ext = document.path.suffix.lower()
+        return ext in SPREADSHEET_EXTENSIONS
+
+    def _classify_spreadsheet(self, document: Document) -> ClassificationResult:
+        """Classify a spreadsheet document as tabular or report-like.
+
+        Args:
+            document: Spreadsheet document to classify.
+
+        Returns:
+            ClassificationResult with classification and reasoning.
+        """
+        path = document.path
+        ext = path.suffix.lower()
+
+        try:
+            # Load data into DataFrame for classification
+            if ext == ".csv":
+                # Detect delimiter from the loaded text
+                delimiter = document.metadata.get("detected_delimiter", ",")
+                df = pd.read_csv(path, delimiter=delimiter, nrows=1000)
+            elif ext == ".tsv":
+                df = pd.read_csv(path, delimiter="\t", nrows=1000)
+            elif ext in (".xlsx", ".xls"):
+                df = pd.read_excel(path, nrows=1000)
+            else:
+                # Fallback for unexpected extension
+                return ClassificationResult(
+                    classification="report_like",
+                    confidence=0.0,
+                    reasons=[f"Unknown spreadsheet type: {ext}"],
+                    metrics={},
+                )
+
+            return classify_dataframe(
+                df,
+                config=self.config.spreadsheet_classification_config,
+                filename=path.name,
+            )
+
+        except Exception as e:
+            logger.warning(f"Could not classify spreadsheet {path}: {e}")
+            return ClassificationResult(
+                classification="report_like",
+                confidence=0.0,
+                reasons=[f"Classification error: {e}"],
+                metrics={"error": str(e)},
+            )
 
     def run(self, document_paths: Optional[List[Path]] = None) -> PipelineResult:
         """Run the ingestion pipeline.
@@ -107,6 +178,20 @@ class IngestionPipeline:
                     skipped += 1
                     logger.info("Skipping %s (no changes detected)", path)
                     continue
+
+                # Classify spreadsheets if enabled
+                if self._is_spreadsheet(document) and self.config.spreadsheet_classification_config:
+                    classification = self._classify_spreadsheet(document)
+                    document.metadata["spreadsheet_classification"] = classification.classification
+                    document.metadata["classification_confidence"] = classification.confidence
+                    document.metadata["classification_reasons"] = classification.reasons
+                    document.metadata["classification_metrics"] = classification.metrics
+                    logger.info(
+                        "Classified %s as %s (confidence: %.1f%%)",
+                        document.doc_id,
+                        classification.classification,
+                        classification.confidence * 100,
+                    )
 
                 chunks = chunk_document(
                     document,
