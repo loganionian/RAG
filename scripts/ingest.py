@@ -110,6 +110,39 @@ def parse_args() -> argparse.Namespace:
         help="Maximum column count for tabular classification (default: 50).",
     )
 
+    # SQL tabular ingestion arguments
+    sql_group = parser.add_argument_group(
+        "sql tabular ingestion", "SQL database ingestion for tabular data"
+    )
+    sql_group.add_argument(
+        "--enable-sql-tabular",
+        action="store_true",
+        help="Enable SQL ingestion for tabular spreadsheets (loads to DuckDB instead of chunking).",
+    )
+    sql_group.add_argument(
+        "--sql-db-path",
+        type=str,
+        default=None,
+        help="Path to DuckDB database file (default: data/tabular/tables.duckdb).",
+    )
+    sql_group.add_argument(
+        "--tabular-threshold",
+        type=float,
+        default=0.7,
+        help="Minimum confidence for tabular classification to use SQL path (default: 0.7 = 70%%).",
+    )
+    sql_group.add_argument(
+        "--list-sql-tables",
+        action="store_true",
+        help="List all tables in the SQL catalog and exit.",
+    )
+    sql_group.add_argument(
+        "--query-sql",
+        type=str,
+        default=None,
+        help="Execute a SQL query against the tabular database and print results.",
+    )
+
     return parser.parse_args()
 
 
@@ -202,9 +235,96 @@ def configure_logging(verbose: bool) -> None:
     logging.basicConfig(level=level, format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s")
 
 
+def handle_sql_commands(args: argparse.Namespace) -> Optional[int]:
+    """Handle SQL-specific commands (--list-sql-tables, --query-sql).
+
+    Args:
+        args: Parsed command line arguments.
+
+    Returns:
+        Exit code if a command was handled, None otherwise.
+    """
+    if not args.list_sql_tables and not args.query_sql:
+        return None
+
+    from storage.sql_store import SQLStore, SQLStoreConfig
+    from storage.metadata_catalog import MetadataCatalog
+
+    # Determine database path
+    output_dir = Path(args.output_dir)
+    db_path = Path(args.sql_db_path) if args.sql_db_path else output_dir.parent / "tabular" / "tables.duckdb"
+
+    if not db_path.exists():
+        logging.error("Database not found: %s", db_path)
+        logging.error("Run ingestion with --enable-sql-tabular first to create the database.")
+        return 1
+
+    sql_config = SQLStoreConfig(db_path=db_path, read_only=True)
+    sql_store = SQLStore(sql_config)
+
+    try:
+        if args.list_sql_tables:
+            catalog = MetadataCatalog(sql_store)
+            entries = catalog.list_tables()
+            if not entries:
+                logging.info("No tables found in catalog.")
+                return 0
+
+            logging.info("=" * 80)
+            logging.info("SQL TABLES IN CATALOG")
+            logging.info("=" * 80)
+            for entry in entries:
+                logging.info(
+                    "  %-30s | %6d rows | %3d cols | %s",
+                    entry.table_name[:30],
+                    entry.row_count,
+                    entry.column_count,
+                    entry.source_file,
+                )
+            logging.info("=" * 80)
+            logging.info("Total: %d table(s)", len(entries))
+            return 0
+
+        if args.query_sql:
+            result = sql_store.execute(args.query_sql)
+            rows = result.fetchall()
+            columns = [desc[0] for desc in result.description]
+
+            # Print results as a table
+            logging.info("Query: %s", args.query_sql)
+            logging.info("-" * 80)
+
+            # Print header
+            header = " | ".join(f"{col:>15}" for col in columns)
+            logging.info(header)
+            logging.info("-" * len(header))
+
+            # Print rows
+            for row in rows[:100]:  # Limit to 100 rows
+                row_str = " | ".join(f"{str(val)[:15]:>15}" for val in row)
+                logging.info(row_str)
+
+            if len(rows) > 100:
+                logging.info("... (%d more rows)", len(rows) - 100)
+
+            logging.info("-" * 80)
+            logging.info("Returned %d row(s)", len(rows))
+            return 0
+
+    finally:
+        sql_store.close()
+
+    return None
+
+
 def main() -> int:
     args = parse_args()
     configure_logging(args.verbose)
+
+    # Handle SQL-specific commands first
+    sql_result = handle_sql_commands(args)
+    if sql_result is not None:
+        return sql_result
 
     output_dir = Path(args.output_dir)
 
@@ -230,10 +350,21 @@ def main() -> int:
     # Build spreadsheet classification configuration
     classification_config = build_classification_config(args)
 
+    # SQL tabular ingestion requires classification to be enabled
+    if args.enable_sql_tabular and classification_config is None:
+        logging.info("Enabling spreadsheet classification (required for SQL tabular ingestion)")
+        classification_config = SpreadsheetClassificationConfig()
+
     if classification_config is not None:
         logging.info("Spreadsheet classification enabled")
     else:
         logging.info("Spreadsheet classification disabled")
+
+    # Build SQL configuration
+    sql_db_path = Path(args.sql_db_path) if args.sql_db_path else None
+
+    if args.enable_sql_tabular:
+        logging.info("SQL tabular ingestion enabled (threshold: %.0f%%)", args.tabular_threshold * 100)
 
     config = PipelineConfig(
         input_dir=Path(args.input_dir),
@@ -244,6 +375,9 @@ def main() -> int:
         normalization_config=normalization_config,
         cleanup_deleted=args.cleanup,
         spreadsheet_classification_config=classification_config,
+        enable_sql_tabular=args.enable_sql_tabular,
+        sql_db_path=sql_db_path,
+        tabular_confidence_threshold=args.tabular_threshold,
     )
 
     pipeline = IngestionPipeline(config)
@@ -259,6 +393,9 @@ def main() -> int:
     if result.cleaned_up > 0:
         logging.info("  Cleaned up:   %d orphaned document(s)", result.cleaned_up)
     logging.info("  Total chunks: %d", result.chunk_count)
+    if args.enable_sql_tabular:
+        logging.info("  SQL tables:   %d created, %d skipped", result.sql_tables_created, result.sql_tables_skipped)
+        logging.info("  SQL rows:     %d ingested", result.sql_rows_ingested)
     logging.info("  Duration:     %.2f seconds", result.duration_seconds)
     logging.info("=" * 60)
 
