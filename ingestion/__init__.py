@@ -8,6 +8,7 @@ from .spreadsheet_classifier import (
     classify_dataframe,
     classify_spreadsheet_file,
 )
+from .spreadsheet_flattener import SpreadsheetFlattener, SpreadsheetFlatteningConfig
 
 __all__ = [
     "ClassificationResult",
@@ -16,6 +17,8 @@ __all__ = [
     "NormalizationResult",
     "PipelineConfig",
     "SpreadsheetClassificationConfig",
+    "SpreadsheetFlattener",
+    "SpreadsheetFlatteningConfig",
     "TextNormalizer",
     "classify_dataframe",
     "classify_spreadsheet_file",

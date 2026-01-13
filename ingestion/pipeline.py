@@ -18,6 +18,7 @@ from .spreadsheet_classifier import (
     SpreadsheetClassificationConfig,
     classify_dataframe,
 )
+from .spreadsheet_flattener import SpreadsheetFlattener, SpreadsheetFlatteningConfig
 from .storage import StorageManager
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,8 @@ class PipelineConfig:
     enable_sql_tabular: bool = False
     sql_db_path: Optional[Path] = None
     tabular_confidence_threshold: float = 0.7
+    spreadsheet_flattening_config: Optional[SpreadsheetFlatteningConfig] = field(default=None)
+    flatten_report_like_spreadsheets: bool = True
 
 
 @dataclass
@@ -260,6 +263,25 @@ class IngestionPipeline:
                         document.doc_id,
                         classification.classification,
                         classification.confidence * 100,
+                    )
+
+                # Flatten report-like spreadsheets for better chunking
+                if (
+                    classification
+                    and classification.classification == "report_like"
+                    and self.config.flatten_report_like_spreadsheets
+                ):
+                    flattener = SpreadsheetFlattener(self.config.spreadsheet_flattening_config)
+                    document.text, flatten_meta = flattener.flatten(
+                        document.text,
+                        document.metadata,
+                    )
+                    document.metadata.update(flatten_meta)
+                    logger.info(
+                        "Flattened %s using %s strategy (layout: %s)",
+                        document.doc_id,
+                        flatten_meta.get("flattening_strategy", "unknown"),
+                        flatten_meta.get("layout_type", "unknown"),
                     )
 
                 # Route to SQL path for tabular spreadsheets

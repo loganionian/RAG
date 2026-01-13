@@ -299,6 +299,74 @@ config = SpreadsheetClassificationConfig(
 )
 ```
 
+### Spreadsheet Flattening (Report-like)
+
+When a spreadsheet is classified as `report_like`, it can be automatically converted to human-readable text format for better semantic chunking and retrieval:
+
+**Layout Detection:**
+The flattener detects three layout types:
+- **table**: Regular grid with consistent columns, rendered as Markdown tables
+- **form**: Sparse key-value pairs, rendered as prose
+- **mixed**: Combination, uses heuristics to choose best format
+
+**Flattening Strategies:**
+
+*Markdown (for table layouts):*
+```markdown
+## Sheet: Financial Summary
+
+| Category | Q1 | Q2 | Q3 |
+|----------|----|----|-----|
+| Revenue  | 100| 120| 140 |
+```
+
+*Prose (for form/sparse layouts):*
+```
+Sheet: Executive Summary
+
+Title: Q4 2024 Report
+Author: Finance Team
+
+Key Metrics:
+- Total Revenue: $1.2M
+- Growth Rate: 15%
+```
+
+**Special Case Handling:**
+- **Footer notes**: Detected and extracted to separate notes section
+- **Header rows**: Automatically detected for proper table formatting
+- **Empty cells**: Skipped in prose, shown as empty in Markdown tables
+- **Large tables**: Truncated to configurable max rows (default: 100)
+
+**Flattening Metadata:**
+When flattening is applied, the following metadata is added:
+- `flattening_applied`: Boolean indicating if flattening occurred
+- `flattening_strategy`: Either "markdown" or "prose"
+- `layout_type`: Detected layout ("table", "form", or "mixed")
+- `original_row_count`: Total rows before flattening
+- `original_col_count`: Total columns before flattening
+- `sheets_flattened`: Per-sheet details (name, layout, strategy, row/col counts)
+
+**Configuration:**
+Flattening is enabled by default when classification is enabled. It can be configured programmatically:
+```python
+from ingestion import SpreadsheetFlatteningConfig, PipelineConfig
+
+config = PipelineConfig(
+    input_dir=Path("data/raw"),
+    output_dir=Path("data/processed"),
+    spreadsheet_classification_config=SpreadsheetClassificationConfig(),
+    flatten_report_like_spreadsheets=True,  # default: True
+    spreadsheet_flattening_config=SpreadsheetFlatteningConfig(
+        empty_ratio_threshold_form=0.6,
+        max_columns_for_form=4,
+        min_rows_for_table=3,
+        include_sheet_headers=True,
+        max_table_rows_markdown=100,
+    ),
+)
+```
+
 ### Text Normalization
 
 The ingestion pipeline includes configurable text normalization applied after document parsing:
