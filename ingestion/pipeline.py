@@ -22,6 +22,22 @@ from .storage import StorageManager
 
 logger = logging.getLogger(__name__)
 
+# Lazy imports for SQL components (only loaded if SQL ingestion is enabled)
+SQLStore = None
+SQLStoreConfig = None
+MetadataCatalog = None
+SQLTableLoader = None
+
+
+def _load_sql_components():
+    """Lazy load SQL components to avoid import errors if not installed."""
+    global SQLStore, SQLStoreConfig, MetadataCatalog, SQLTableLoader
+    if SQLStore is None:
+        from storage.sql_store import SQLStore, SQLStoreConfig
+        from storage.metadata_catalog import MetadataCatalog
+        from .sql_loader import SQLTableLoader
+    return SQLStore, SQLStoreConfig, MetadataCatalog, SQLTableLoader
+
 
 @dataclass
 class PipelineConfig:
@@ -37,6 +53,10 @@ class PipelineConfig:
         cleanup_deleted: Remove orphaned docs whose source files were deleted.
         spreadsheet_classification_config: Optional config for classifying
             spreadsheets as tabular vs report-like.
+        enable_sql_tabular: Enable SQL ingestion for tabular spreadsheets.
+        sql_db_path: Path to DuckDB database file for tabular data.
+        tabular_confidence_threshold: Minimum confidence for tabular classification
+            to trigger SQL ingestion (0.0-1.0).
     """
 
     input_dir: Path
@@ -47,6 +67,9 @@ class PipelineConfig:
     normalization_config: Optional[NormalizationConfig] = field(default=None)
     cleanup_deleted: bool = False
     spreadsheet_classification_config: Optional[SpreadsheetClassificationConfig] = field(default=None)
+    enable_sql_tabular: bool = False
+    sql_db_path: Optional[Path] = None
+    tabular_confidence_threshold: float = 0.7
 
 
 @dataclass
@@ -60,6 +83,9 @@ class PipelineResult:
     end_time: str
     duration_seconds: float
     cleaned_up: int = 0
+    sql_tables_created: int = 0
+    sql_tables_skipped: int = 0
+    sql_rows_ingested: int = 0
 
 
 SPREADSHEET_EXTENSIONS = {".csv", ".tsv", ".xlsx", ".xls"}
@@ -87,6 +113,47 @@ class IngestionPipeline:
 
         self.loader = DocumentLoader(config.input_dir, normalizer=normalizer)
         self.storage = StorageManager(config.output_dir)
+
+        # Initialize SQL components if enabled
+        self.sql_store = None
+        self.sql_catalog = None
+        self.sql_loader = None
+        if config.enable_sql_tabular:
+            self._init_sql_components()
+
+    def _init_sql_components(self) -> None:
+        """Initialize SQL storage components for tabular data."""
+        SQLStore, SQLStoreConfig, MetadataCatalog, SQLTableLoader = _load_sql_components()
+
+        # Default database path if not specified
+        db_path = self.config.sql_db_path
+        if db_path is None:
+            db_path = self.config.output_dir.parent / "tabular" / "tables.duckdb"
+
+        sql_config = SQLStoreConfig(db_path=db_path)
+        self.sql_store = SQLStore(sql_config)
+        self.sql_catalog = MetadataCatalog(self.sql_store)
+        self.sql_loader = SQLTableLoader(self.sql_store, self.sql_catalog)
+
+        logger.info("SQL tabular ingestion enabled, database: %s", db_path)
+
+    def _should_use_sql_path(self, classification: ClassificationResult) -> bool:
+        """Determine if a spreadsheet should use SQL ingestion path.
+
+        Args:
+            classification: ClassificationResult from spreadsheet classifier.
+
+        Returns:
+            True if the spreadsheet should be loaded into SQL.
+        """
+        if not self.config.enable_sql_tabular:
+            return False
+        if self.sql_loader is None:
+            return False
+        return (
+            classification.classification == "tabular"
+            and classification.confidence >= self.config.tabular_confidence_threshold
+        )
 
     def _is_spreadsheet(self, document: Document) -> bool:
         """Check if document is a spreadsheet type.
@@ -159,6 +226,7 @@ class IngestionPipeline:
         start = datetime.utcnow()
         documents = document_paths or discover_documents(self.config.input_dir)
         processed = skipped = failed = chunk_total = 0
+        sql_tables_created = sql_tables_skipped = sql_rows_ingested = 0
         failures: List[FailureInfo] = []
 
         if not documents:
@@ -180,6 +248,7 @@ class IngestionPipeline:
                     continue
 
                 # Classify spreadsheets if enabled
+                classification = None
                 if self._is_spreadsheet(document) and self.config.spreadsheet_classification_config:
                     classification = self._classify_spreadsheet(document)
                     document.metadata["spreadsheet_classification"] = classification.classification
@@ -193,6 +262,28 @@ class IngestionPipeline:
                         classification.confidence * 100,
                     )
 
+                # Route to SQL path for tabular spreadsheets
+                if classification and self._should_use_sql_path(classification):
+                    sql_results = self.sql_loader.load_spreadsheet_file(
+                        file_path=path,
+                        domain_labels=document.metadata.get("domain_labels"),
+                    )
+                    for sql_result in sql_results:
+                        if sql_result.was_skipped:
+                            sql_tables_skipped += 1
+                        else:
+                            sql_tables_created += 1
+                            sql_rows_ingested += sql_result.row_count
+                    logger.info(
+                        "SQL loaded %s -> %d table(s), %d rows",
+                        document.metadata.get("relative_path", document.doc_id),
+                        len(sql_results),
+                        sum(r.row_count for r in sql_results if not r.was_skipped),
+                    )
+                    processed += 1
+                    continue
+
+                # Standard chunk path for non-tabular documents
                 chunks = chunk_document(
                     document,
                     chunk_size_tokens=self.config.chunk_size_tokens,
@@ -261,10 +352,17 @@ class IngestionPipeline:
             end.isoformat() + "Z",
             (end - start).total_seconds(),
             cleaned_up,
+            sql_tables_created,
+            sql_tables_skipped,
+            sql_rows_ingested,
         )
 
         # Save failures and report
         self.storage.save_failures(failures)
         self.storage.save_report(result)
+
+        # Close SQL connection if opened
+        if self.sql_store is not None:
+            self.sql_store.close()
 
         return result
