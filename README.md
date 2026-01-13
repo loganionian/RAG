@@ -5,13 +5,13 @@ This epic delivers a usable retrieval augmented generation (RAG) MVP that lets u
 ## Feature Breakdown
 
 ### 1. Ingestion Pipeline v1 (Parse + Heuristic Chunking)
-- Batch job parses the pilot corpus (PDF, DOCX, Markdown) into normalized text with metadata.
+- Batch job parses the pilot corpus (PDF, DOCX, Excel, Markdown) into normalized text with metadata.
 - Simple heuristic chunking (~300-500 tokens) emits chunks with `doc_id` plus source references.
 - Failures log without aborting the run and reruns remain idempotent (no duplicate records).
 
 #### Implementation snapshot
 - Python ingestion package under `ingestion/` handles parsing, normalization, chunking, and persistence.
-- Document loaders support PDF (`PyPDF2`), DOCX (`python-docx`), Markdown, and plain text. Each run computes a content hash so unchanged documents are skipped automatically.
+- Document loaders support PDF (`PyPDF2`), DOCX (`python-docx`), Excel (`openpyxl`), Markdown, and plain text. Each run computes a content hash so unchanged documents are skipped automatically.
 - Heuristic chunker groups paragraphs into ~400-token windows with ~80-token overlap to preserve context continuity.
 - Outputs are written to `data/processed/chunks/<doc_id>.jsonl` plus a `manifest.json` summarizing each document's metadata and hash, guaranteeing idempotent re-runs.
 

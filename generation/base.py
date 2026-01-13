@@ -7,9 +7,26 @@ compatible without explicit inheritance.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
-from .api_client import LLMResponse, Message
+
+@dataclass
+class Message:
+    """A chat message."""
+
+    role: str
+    content: str
+
+
+@dataclass
+class LLMResponse:
+    """Response from any LLM provider."""
+
+    content: str
+    model: Optional[str] = None
+    usage: Optional[dict] = None
+    raw_response: Optional[dict] = field(default=None, repr=False)
 
 
 @runtime_checkable

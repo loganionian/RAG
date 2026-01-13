@@ -9,10 +9,12 @@ import json
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import requests
+
+from .base import LLMResponse, Message
 
 
 @dataclass
@@ -44,24 +46,6 @@ class LLMConfig:
             raise ValueError("BASE_URL environment variable is required")
 
         return cls(api_key=api_key, api_secret=api_secret, base_url=base_url)
-
-
-@dataclass
-class Message:
-    """A chat message."""
-
-    role: str
-    content: str
-
-
-@dataclass
-class LLMResponse:
-    """Response from the LLM API."""
-
-    content: str
-    model: Optional[str] = None
-    usage: Optional[dict] = None
-    raw_response: Optional[dict] = field(default=None, repr=False)
 
 
 class LLMClientError(Exception):

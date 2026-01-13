@@ -6,7 +6,8 @@ import os
 from dataclasses import dataclass
 from typing import Optional
 
-from ..api_client import LLMClientError, LLMResponse, Message
+from ..api_client import LLMClientError
+from ..base import LLMResponse, Message
 
 
 @dataclass

@@ -9,7 +9,8 @@ from typing import Optional
 
 import requests
 
-from ..api_client import LLMClientError, LLMResponse, Message
+from ..api_client import LLMClientError
+from ..base import LLMResponse, Message
 
 
 @dataclass

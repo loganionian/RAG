@@ -18,9 +18,9 @@ Usage:
     client = create_llm_client("openai")
 """
 
-from .api_client import LLMClient, LLMClientError, LLMConfig, LLMResponse, Message
-from .base import BaseLLMClient
-from .factory import ProviderError, create_llm_client, get_available_providers
+from .api_client import LLMClient, LLMClientError, LLMConfig
+from .base import BaseLLMClient, LLMResponse, Message
+from .factory import ProviderError, create_llm_client, get_available_providers, get_provider_info
 from .rag_chain import RAGChain, RAGConfig, RAGResponse
 
 __all__ = [
@@ -35,6 +35,7 @@ __all__ = [
     # Factory
     "create_llm_client",
     "get_available_providers",
+    "get_provider_info",
     "ProviderError",
     # RAG
     "RAGChain",
