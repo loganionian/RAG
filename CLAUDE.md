@@ -85,10 +85,13 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 - `embeddings.py`: `EmbeddingService` with retry logic, `EmbeddingConfig`, `EmbeddingError`
 - `dataset.py`: Loads chunks from manifest/JSONL files
 - `pipeline.py`: `ChromaIndexingPipeline` handles batch embedding and upsert with failure tolerance
+- `summary_indexer.py`: `SummaryIndexer` for indexing dataset summaries in Chroma
 
 **generation/** - LLM-powered response generation
 - `api_client.py`: HMAC-authenticated LLM client with `LLMClient`, `LLMConfig`
 - `rag_chain.py`: `RAGChain` combines retrieval and generation
+- `dataset_summarizer.py`: `DatasetSummarizer` generates LLM summaries for tabular datasets
+- `cost_tracker.py`: `CostTracker` for token usage tracking and budget controls
 
 **scripts/** - CLI entry points for each pipeline stage
 
@@ -439,6 +442,74 @@ python -m scripts.ingest --fail-fast --input-dir data/raw --output-dir data/proc
 - `error_message`: Error description
 - `traceback`: Full stack trace for debugging
 - `timestamp`: When the failure occurred
+
+### Dataset Catalog & Summaries
+
+The pipeline can generate LLM-based summaries for tabular datasets, enabling semantic discovery of data sources.
+
+**Architecture:**
+```
+MetadataCatalog ──────► DatasetSummarizer ──────► SummaryIndexer
+      │                        │                        │
+ (table schema)          (LLM generate)          (Chroma upsert)
+      │                        │                        │
+      ▼                        ▼                        ▼
+_ingestion_catalog       LLM API call            dataset-summaries
+(DuckDB table)           + cost tracking         (Chroma collection)
+```
+
+**Generate Summaries:**
+```bash
+# Generate summaries for all tables without summaries
+python -m scripts.generate_summaries --chroma-dir data/vectorstore --verbose
+
+# Generate for specific tables only
+python -m scripts.generate_summaries --tables sales_2024 inventory
+
+# Dry run to estimate tokens/cost
+python -m scripts.generate_summaries --dry-run
+
+# Set token budget
+python -m scripts.generate_summaries --max-tokens 10000
+
+# List tables and summary status
+python -m scripts.generate_summaries --list-tables
+```
+
+**Query Datasets:**
+```bash
+# Semantic search for datasets
+python -m scripts.query_datasets --question "What sales data do we have?"
+
+# List all indexed datasets
+python -m scripts.query_datasets --list-all
+
+# Get details for specific dataset
+python -m scripts.query_datasets --describe sales_2024
+
+# JSON output for programmatic use
+python -m scripts.query_datasets -q "financial data" --json
+
+# Show catalog and index statistics
+python -m scripts.query_datasets --stats
+```
+
+**Summary Metadata:**
+When summaries are generated, the following is stored:
+- `summary`: LLM-generated natural-language description
+- `column_descriptions`: Descriptions for key columns
+- `summary_generated_at`: Timestamp of generation
+- `summary_token_usage`: Token counts for cost tracking
+
+**Cost Controls:**
+- Default token budget: 50,000 tokens per run
+- Budget enforcement stops processing when limit is reached
+- Use `--dry-run` to estimate costs before generating
+
+**Chroma Collection:**
+Summaries are indexed in a separate `dataset-summaries` collection for semantic search.
+- Document format: Summary text + column list
+- Metadata includes: table_name, source_file, row_count, domain_labels
 
 ### Migration Notes
 
