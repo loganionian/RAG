@@ -86,11 +86,14 @@ class AnthropicClient:
         system_prompt = None
         anthropic_messages = []
 
+        # Handle both Message objects and dicts for flexibility
         for m in messages:
-            if m.role == "system":
-                system_prompt = m.content
+            role = m["role"] if isinstance(m, dict) else m.role
+            content = m["content"] if isinstance(m, dict) else m.content
+            if role == "system":
+                system_prompt = content
             else:
-                anthropic_messages.append({"role": m.role, "content": m.content})
+                anthropic_messages.append({"role": role, "content": content})
 
         try:
             kwargs = {

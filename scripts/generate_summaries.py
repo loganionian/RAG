@@ -242,7 +242,11 @@ def main() -> int:
 
     logger.info("Found %d tables to summarize", len(table_names))
 
-    # Create summarizer (need write access for updating summaries)
+    # Close read-only connection before opening write connection
+    # DuckDB doesn't allow mixed configurations on the same database
+    sql_store.close()
+
+    # Create write-enabled connection for updating summaries
     sql_store_write = SQLStore(SQLStoreConfig(db_path=db_path, read_only=False))
     catalog_write = MetadataCatalog(sql_store_write)
 
@@ -252,8 +256,8 @@ def main() -> int:
         llm_client = create_llm_client()
         summarizer = DatasetSummarizer(
             llm_client=llm_client,
-            sql_store=sql_store,
-            catalog=catalog,
+            sql_store=sql_store_write,
+            catalog=catalog_write,
             config=SummaryConfig(
                 sample_rows=args.sample_rows,
                 temperature=args.temperature,
@@ -279,8 +283,8 @@ def main() -> int:
 
     summarizer = DatasetSummarizer(
         llm_client=llm_client,
-        sql_store=sql_store,
-        catalog=catalog,
+        sql_store=sql_store_write,
+        catalog=catalog_write,
         config=summary_config,
         cost_config=cost_config,
     )

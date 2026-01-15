@@ -82,9 +82,13 @@ class OpenAIClient:
         """
         client = self._get_client()
 
-        openai_messages = [
-            {"role": m.role, "content": m.content} for m in messages
-        ]
+        # Handle both Message objects and dicts for flexibility
+        openai_messages = []
+        for m in messages:
+            if isinstance(m, dict):
+                openai_messages.append({"role": m["role"], "content": m["content"]})
+            else:
+                openai_messages.append({"role": m.role, "content": m.content})
 
         try:
             response = client.chat.completions.create(
