@@ -2,16 +2,19 @@
 
 This epic delivers a usable retrieval augmented generation (RAG) MVP that lets users chat over a limited pilot corpus. The scope covers ingestion, indexing, retrieval, a minimal UI, and an evaluation loop. Target delivery is **end of Week 8**.
 
+**E3 Update:** Multi-format ingestion now supports DOC/DOCX, CSV/XLSX with automatic spreadsheet classification, SQL ingestion for tabular data via DuckDB, and dataset catalog with LLM-generated summaries.
+
 ## Feature Breakdown
 
 ### 1. Ingestion Pipeline v1 (Parse + Heuristic Chunking)
-- Batch job parses the pilot corpus (PDF, DOCX, Excel, Markdown) into normalized text with metadata.
+- Batch job parses the pilot corpus (PDF, DOC, DOCX, Excel, CSV, Markdown) into normalized text with metadata.
 - Simple heuristic chunking (~300-500 tokens) emits chunks with `doc_id` plus source references.
 - Failures log without aborting the run and reruns remain idempotent (no duplicate records).
+- **E3:** Spreadsheet classification automatically detects tabular vs report-like content.
 
 #### Implementation snapshot
 - Python ingestion package under `ingestion/` handles parsing, normalization, chunking, and persistence.
-- Document loaders support PDF (`PyPDF2`), DOCX (`python-docx`), Excel (`openpyxl`), Markdown, and plain text. Each run computes a content hash so unchanged documents are skipped automatically.
+- Document loaders support PDF (`PyPDF2`), DOC (`antiword`/`win32com`), DOCX (`python-docx`), Excel (`openpyxl`), CSV/TSV (with auto delimiter detection), Markdown, and plain text. Each run computes a content hash so unchanged documents are skipped automatically.
 - Heuristic chunker groups paragraphs into ~400-token windows with ~80-token overlap to preserve context continuity.
 - Outputs are written to `data/processed/chunks/<doc_id>.jsonl` plus a `manifest.json` summarizing each document's metadata and hash, guaranteeing idempotent re-runs.
 
@@ -21,6 +24,25 @@ This epic delivers a usable retrieval augmented generation (RAG) MVP that lets u
 3. Drop pilot documents under `data/raw/` (any subfolder structure is fine).
 4. `python -m scripts.ingest --input-dir data/raw --output-dir data/processed` (you can tune `--chunk-size` / `--chunk-overlap`).
 5. Inspect `data/processed/chunks/*.jsonl` and `data/processed/manifest.json` for chunk outputs and metadata snapshots.
+
+#### E3: Spreadsheet Classification & SQL Ingestion
+Enable spreadsheet classification to route tabular data to SQL storage:
+```bash
+python -m scripts.ingest --input-dir data/raw --output-dir data/processed \
+    --classify-spreadsheets \
+    --enable-sql-tabular \
+    --sql-db-path data/sql/datasets.duckdb \
+    --verbose
+```
+
+List and query SQL tables:
+```bash
+# List all tables
+python -m scripts.ingest --list-sql-tables --sql-db-path data/sql/datasets.duckdb
+
+# Run SQL query
+python -m scripts.ingest --query-sql "SELECT * FROM sales_data_2024 LIMIT 5" --sql-db-path data/sql/datasets.duckdb
+```
 
 | Attribute | Value |
 | --- | --- |
@@ -82,8 +104,24 @@ PY
 - CLI `python -m scripts.rag_chat` supports single questions, interactive chat mode, and JSON output.
 
 #### Setup
-1. Create a `.env` file in the project root with your LLM API credentials:
+1. Create a `.env` file in the project root with your LLM provider credentials:
+
+   **OpenAI Provider:**
+   ```env
+   LLM_PROVIDER=openai
+   OPENAI_API_KEY=your-api-key
+   OPENAI_MODEL=gpt-4o
    ```
+
+   **Anthropic Provider:**
+   ```env
+   LLM_PROVIDER=anthropic
+   ANTHROPIC_API_KEY=your-api-key
+   ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+   ```
+
+   **Legacy HMAC Provider:**
+   ```env
    API_KEY=your_api_key
    API_SECRET=your_api_secret
    BASE_URL=https://your-llm-api-endpoint
@@ -150,6 +188,47 @@ python -m scripts.query_chunks --question "skills demand 2025" --k 3 --pretty
 | Dependencies | REST API available; pilot users identified |
 | Priority | Medium |
 
+### 5. E3: Dataset Catalog & LLM Summaries
+- **Spreadsheet classification** automatically detects tabular vs report-like content using heuristics (row count, numeric ratio, long text, empty cells).
+- **SQL ingestion** routes tabular spreadsheets to DuckDB for structured querying instead of chunking.
+- **Spreadsheet flattening** converts report-like spreadsheets to Markdown/prose for semantic chunking.
+- **Dataset summaries** uses LLM to generate natural-language descriptions for tabular datasets.
+- **Semantic dataset discovery** indexes summaries in Chroma for finding relevant data sources by question.
+
+#### Generate Dataset Summaries
+```bash
+# Generate summaries for all tables
+python -m scripts.generate_summaries --db-path data/sql/datasets.duckdb --chroma-dir data/vectorstore --verbose
+
+# Dry run to estimate token costs
+python -m scripts.generate_summaries --dry-run
+
+# List tables and summary status
+python -m scripts.generate_summaries --list-tables
+```
+
+#### Query Dataset Catalog
+```bash
+# Semantic search for datasets
+python -m scripts.query_datasets --question "What sales data do we have?" --chroma-dir data/vectorstore
+
+# List all indexed datasets
+python -m scripts.query_datasets --list-all
+
+# Get details for specific dataset
+python -m scripts.query_datasets --describe sales_2024
+
+# Show catalog statistics
+python -m scripts.query_datasets --stats
+```
+
+| Attribute | Value |
+| --- | --- |
+| Estimated Effort | 5 dev-days |
+| Confidence | High |
+| Dependencies | Ingestion pipeline; SQL store; LLM provider configured |
+| Priority | High |
+
 ## Summary Table
 
 | Feature | Effort | Confidence | Priority | Dependencies |
@@ -158,5 +237,6 @@ python -m scripts.query_chunks --question "skills demand 2025" --k 3 --pretty
 | Chroma Setup & Vector Indexing | 5 dev-days | High | High | Ingestion pipeline v1; embeddings working |
 | Simple RAG Chain + REST API | 7 dev-days | Medium | High | Chroma indexing; LLM baseline; auth/config |
 | Minimal UI + Evaluation Set | 4 dev-days | Medium | Medium | REST API available; pilot users identified |
+| E3: Dataset Catalog & LLM Summaries | 5 dev-days | High | High | Ingestion pipeline; SQL store; LLM provider |
 
-**Total Estimated Effort:** 22 dev-days.
+**Total Estimated Effort:** 27 dev-days.
