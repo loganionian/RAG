@@ -50,6 +50,15 @@ python -m scripts.rag_chat -q "What skills are in demand?" --show-sources
 python -m scripts.rag_chat -q "Summarize the report" --json
 ```
 
+### REST API Server
+```bash
+# Start the API server (default: http://localhost:8000)
+python -m uvicorn api.main:app --reload
+
+# Start with custom host/port
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8080
+```
+
 **Required environment variables** (in `.env`):
 ```
 API_KEY=your_api_key
@@ -92,6 +101,13 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 - `rag_chain.py`: `RAGChain` combines retrieval and generation
 - `dataset_summarizer.py`: `DatasetSummarizer` generates LLM summaries for tabular datasets
 - `cost_tracker.py`: `CostTracker` for token usage tracking and budget controls
+
+**api/** - REST API (UI-agnostic)
+- `main.py`: FastAPI application with CORS, lifespan events
+- `schemas.py`: Pydantic request/response models
+- `routes/query.py`: POST /api/query endpoint
+- `routes/ingest.py`: POST /api/ingest endpoint
+- `routes/documents.py`: GET /api/documents, GET /api/health endpoints
 
 **scripts/** - CLI entry points for each pipeline stage
 
@@ -510,6 +526,150 @@ When summaries are generated, the following is stored:
 Summaries are indexed in a separate `dataset-summaries` collection for semantic search.
 - Document format: Summary text + column list
 - Metadata includes: table_name, source_file, row_count, domain_labels
+
+### REST API
+
+The REST API provides a UI-agnostic interface to the RAG system. It is designed to work with any frontend framework or HTTP client.
+
+**Architecture Principles:**
+- **UI Independence**: The API has no dependencies on any UI framework
+- **Standard REST**: JSON request/response format, standard HTTP methods
+- **CORS Enabled**: Allows requests from any origin (configurable)
+- **OpenAPI Documentation**: Auto-generated Swagger UI at `/docs`
+
+**Start the Server:**
+```bash
+# Development mode with auto-reload
+python -m uvicorn api.main:app --reload
+
+# Production mode
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
+
+**Environment Variables:**
+```bash
+# Override default paths
+PROCESSED_DIR=data/processed
+VECTORSTORE_DIR=data/vectorstore
+RAW_DIR=data/raw
+COLLECTION_NAME=pilot-docs
+
+# LLM provider (see generation/ docs)
+LLM_PROVIDER=openai  # or: custom, anthropic, ollama
+```
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/` | API info and version |
+| GET | `/api/health` | Health check (vectorstore + LLM) |
+| GET | `/api/documents` | List all ingested documents |
+| POST | `/api/query` | Query RAG with a question |
+| POST | `/api/ingest` | Upload and ingest a document |
+
+**Query Endpoint:**
+```bash
+curl -X POST http://localhost:8000/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What skills are in demand?", "k": 5}'
+```
+
+Response:
+```json
+{
+  "answer": "The most in-demand skills include...",
+  "sources": [
+    {
+      "doc_id": "report-pdf",
+      "filename": "report.pdf",
+      "chunk_id": "report-pdf::chunk-0001",
+      "snippet": "First 200 chars of chunk...",
+      "page": 5
+    }
+  ],
+  "metadata": {
+    "retrieval_time_ms": 45.2,
+    "generation_time_ms": 1523.8
+  }
+}
+```
+
+**Ingest Endpoint:**
+```bash
+curl -X POST http://localhost:8000/api/ingest \
+  -F "file=@document.pdf"
+```
+
+Response:
+```json
+{
+  "doc_id": "document-pdf",
+  "filename": "document.pdf",
+  "status": "success",
+  "chunks_created": 42,
+  "message": "Document ingested and indexed successfully"
+}
+```
+
+**Health Endpoint:**
+```bash
+curl http://localhost:8000/api/health
+```
+
+Response:
+```json
+{
+  "status": "healthy",
+  "vectorstore": {
+    "healthy": true,
+    "message": "Chroma healthy. Collection 'pilot-docs' has 590 documents.",
+    "collection_count": 2,
+    "document_count": 590
+  },
+  "llm_provider": {
+    "healthy": true,
+    "message": "OpenAI configured",
+    "provider": "openai"
+  }
+}
+```
+
+**Documents Endpoint:**
+```bash
+curl http://localhost:8000/api/documents
+```
+
+Response:
+```json
+{
+  "documents": [
+    {
+      "doc_id": "report-pdf",
+      "filename": "report.pdf",
+      "file_type": "pdf",
+      "chunks": 417,
+      "ingested_at": "2026-01-07T16:29:52.977785Z"
+    }
+  ],
+  "total": 4
+}
+```
+
+**Error Responses:**
+All errors follow a consistent format:
+```json
+{
+  "detail": "Error message describing what went wrong",
+  "error_type": "ExceptionClassName"
+}
+```
+
+HTTP Status Codes:
+- `400`: Validation error (invalid request)
+- `404`: Resource not found
+- `500`: Internal server error
+- `503`: Service unavailable (RAG not initialized)
 
 ### Migration Notes
 
