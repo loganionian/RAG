@@ -216,3 +216,7 @@ data/vectorstore/
 # Claude Code
 .claude/
 CLAUDE.md
+
+# UI (React/Vite)
+ui/node_modules/
+ui/dist/
