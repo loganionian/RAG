@@ -1,29 +1,9 @@
 import { Routes, Route } from 'react-router-dom';
 import { useEffect, useCallback, useState } from 'react';
 import { Header, Sidebar, Container } from './components/Layout';
+import { Chat } from './components/Chat';
+import { Documents } from './components/Documents';
 import type { HealthResponse } from './types/api';
-
-function ChatPlaceholder() {
-  return (
-    <div className="flex h-full flex-col items-center justify-center text-center">
-      <h2 className="text-2xl font-semibold text-gray-900 dark:text-gray-100">Chat</h2>
-      <p className="mt-2 text-gray-600 dark:text-gray-400">
-        Chat interface will be implemented in issue #107
-      </p>
-    </div>
-  );
-}
-
-function DocumentsPlaceholder() {
-  return (
-    <div className="flex h-full flex-col items-center justify-center text-center">
-      <h2 className="text-2xl font-semibold text-gray-900 dark:text-gray-100">Documents</h2>
-      <p className="mt-2 text-gray-600 dark:text-gray-400">
-        Document management will be implemented in issue #108
-      </p>
-    </div>
-  );
-}
 
 function App() {
   const [isConnected, setIsConnected] = useState(false);
@@ -58,8 +38,8 @@ function App() {
       <Sidebar />
       <Container>
         <Routes>
-          <Route path="/" element={<ChatPlaceholder />} />
-          <Route path="/documents" element={<DocumentsPlaceholder />} />
+          <Route path="/" element={<Chat />} />
+          <Route path="/documents" element={<Documents />} />
         </Routes>
       </Container>
     </div>
