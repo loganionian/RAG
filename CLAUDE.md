@@ -149,6 +149,39 @@ python -m scripts.download_model --output-dir models
 set EMBEDDING_MODEL_PATH=models/sentence-transformers_all-MiniLM-L6-v2
 ```
 
+### Tiktoken Cache (Offline/Corporate Environments)
+
+The tiktoken library (used for token counting) downloads encoding files at runtime. For environments with SSL issues or no internet access, pre-download the cache:
+
+**Download the cache** (from a machine with internet):
+```bash
+python -m scripts.download_tiktoken_cache --output-dir models/tiktoken_cache
+```
+
+**Download all encodings** (if using multiple models):
+```bash
+python -m scripts.download_tiktoken_cache --output-dir models/tiktoken_cache --all
+```
+
+**Skip SSL verification** (for corporate environments with SSL inspection):
+```bash
+python -m scripts.download_tiktoken_cache --output-dir models/tiktoken_cache --skip-ssl
+```
+
+**The cache will be saved to:** `models/tiktoken_cache/`
+
+**Usage:** The code automatically detects the local cache in `models/tiktoken_cache/` directory. No configuration changes needed.
+
+**Manual override:** Set environment variable:
+```bash
+set TIKTOKEN_CACHE_DIR=models/tiktoken_cache
+```
+
+**Available encodings:**
+- `cl100k_base` (default) - Used by GPT-4, GPT-3.5-turbo
+- `p50k_base` - Used by older models
+- `o200k_base` - Used by GPT-4o
+
 ### Legacy DOC File Support
 
 The ingestion pipeline supports legacy Word documents (.doc format, Word 97-2003) with multiple extraction strategies:

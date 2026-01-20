@@ -1,10 +1,32 @@
 ﻿from __future__ import annotations
 
+import os
 import re
 from functools import lru_cache
+from pathlib import Path
 from typing import List, Optional
 
-import tiktoken
+# Configure tiktoken cache directory BEFORE importing tiktoken
+# This allows offline use in air-gapped environments
+def _configure_tiktoken_cache() -> None:
+    """Configure TIKTOKEN_CACHE_DIR if a local cache exists."""
+    if os.environ.get("TIKTOKEN_CACHE_DIR"):
+        return  # Already configured
+
+    # Check for local cache in models/tiktoken_cache relative to project root
+    # Walk up from this file to find the project root (where models/ would be)
+    current_dir = Path(__file__).resolve().parent
+    for _ in range(3):  # Go up at most 3 levels
+        cache_dir = current_dir / "models" / "tiktoken_cache"
+        if cache_dir.exists() and any(cache_dir.iterdir()):
+            os.environ["TIKTOKEN_CACHE_DIR"] = str(cache_dir)
+            return
+        current_dir = current_dir.parent
+
+
+_configure_tiktoken_cache()
+
+import tiktoken  # noqa: E402 - must be after cache configuration
 
 MULTI_NEWLINE_PATTERN = re.compile(r"\n{3,}")
 MULTI_SPACE_PATTERN = re.compile(r"[ \t]{2,}")
