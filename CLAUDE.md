@@ -136,6 +136,18 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 - `routes/ingest.py`: POST /api/ingest endpoint
 - `routes/documents.py`: GET /api/documents, GET /api/health endpoints
 - `routes/sql_query.py`: POST /api/sql-query, GET /api/sql-tables endpoints
+- `routes/unified_query.py`: POST /api/unified-query endpoint with auto-routing
+
+**router/** - Question classification and routing
+- `config.py`: `RouterConfig` with SQL/doc keyword patterns and thresholds
+- `models.py`: `QueryType` enum (documents, structured, hybrid), `RouteDecision`
+- `classifier.py`: `QuestionClassifier` for rule-based query routing
+
+**security/** - ACL-based access control
+- `config.py`: `SecurityContext`, `ACLConfig`, `TableACLConfig`
+- `acl_filter.py`: `ACLFilter` for document retrieval filtering by role
+- `table_acl.py`: `TableACL` for SQL table access control by role
+- `audit_logger.py`: `AuditLogger` for routing/access events (JSONL)
 
 **sql_agent/** - Natural language to SQL agent
 - `config.py`: `SQLAgentConfig` with database settings and guardrails
@@ -817,6 +829,9 @@ LLM_PROVIDER=openai  # or: custom, anthropic, ollama
 | GET | `/api/documents` | List all ingested documents |
 | POST | `/api/query` | Query RAG with a question |
 | POST | `/api/ingest` | Upload and ingest a document |
+| POST | `/api/unified-query` | Auto-routing query (RAG, SQL, or both) |
+| POST | `/api/sql-query` | Query SQL tables with natural language |
+| GET | `/api/sql-tables` | List available SQL tables |
 
 **Query Endpoint:**
 ```bash
@@ -1068,6 +1083,169 @@ chain = SQLChain(llm_client, config)
 result = chain.query("What tables are available?")
 ```
 
+### Question Router & Unified Query
+
+The unified query endpoint automatically classifies questions and routes them to the appropriate backend (document search, SQL query, or both).
+
+**Architecture:**
+```
+User Question → QuestionClassifier
+                      │
+        ┌─────────────┼─────────────┐
+        ▼             ▼             ▼
+   DOCUMENTS      STRUCTURED      HYBRID
+   (RAGChain)     (SQLChain)      (Both)
+        │             │             │
+        └─────────────┴─────────────┘
+                      ▼
+              UnifiedQueryResponse
+```
+
+**Classification Signals:**
+- **SQL keywords**: count, sum, average, table, rows, how many, top 5, etc.
+- **Document keywords**: document, report, policy, explain, according to, etc.
+- **Table name detection**: Matches against known table names
+- **Pattern detection**: Aggregation patterns, document reference patterns
+
+**API Usage:**
+```bash
+# Auto-routed query (classifier decides)
+curl -X POST http://localhost:8080/api/unified-query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What skills are in demand?", "k": 5}'
+
+# Force routing to documents
+curl -X POST http://localhost:8080/api/unified-query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How many products?", "force_route": "documents"}'
+
+# Force routing to SQL
+curl -X POST http://localhost:8080/api/unified-query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What does the policy say?", "force_route": "structured"}'
+
+# With security context (for ACL filtering)
+curl -X POST http://localhost:8080/api/unified-query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "question": "Show sales data",
+    "security_context": {"user_id": "user1", "roles": ["analyst"]}
+  }'
+```
+
+**Response:**
+```json
+{
+  "answer": "Based on the documents...",
+  "sources": [...],
+  "sql_result": null,
+  "metadata": {
+    "routing": {
+      "query_type": "documents",
+      "confidence": 0.85,
+      "reasoning": "2 document keywords; document reference pattern detected",
+      "routing_time_ms": 1.5,
+      "forced": false
+    },
+    "retrieval_time_ms": 45.2,
+    "generation_time_ms": 1200.3,
+    "search_mode": "hybrid"
+  }
+}
+```
+
+**Request Parameters:**
+- `question` (required): The question to ask
+- `security_context` (optional): User identity and roles for ACL filtering
+- `k` (optional, default: 5): Number of chunks to retrieve
+- `search_mode` (optional, default: "hybrid"): Search mode for document queries
+- `force_route` (optional): Force routing to "documents", "structured", or "hybrid"
+- `rerank` (optional): Enable/disable cross-encoder reranking
+
+**Programmatic Usage:**
+```python
+from router import QuestionClassifier, RouterConfig, QueryType
+
+# Configure classifier with known tables
+config = RouterConfig(known_tables=["sales", "products", "orders"])
+classifier = QuestionClassifier(config)
+
+# Classify a question
+decision = classifier.classify("How many rows in the sales table?")
+print(decision.query_type)    # QueryType.STRUCTURED
+print(decision.confidence)     # 0.85
+print(decision.reasoning)      # "3 SQL keywords; matched tables: ['sales']"
+print(decision.signals)        # {'sql_keyword_count': 3, 'matched_tables': ['sales'], ...}
+```
+
+### ACL-Based Access Control
+
+The system supports role-based access control for both document retrieval and SQL table access. ACL is **disabled by default** for backward compatibility.
+
+**Document ACL:**
+Documents can have an `acl_read` metadata field containing allowed roles:
+```python
+# During ingestion, set ACL on document metadata
+chunk.metadata["acl_read"] = ["analyst", "manager"]  # Only these roles can access
+chunk.metadata["acl_read"] = []  # Empty = use default_allow_empty_acl setting
+```
+
+**Table ACL:**
+Configure which roles can access which SQL tables:
+```python
+from security import TableACLConfig, TableACL, SecurityContext
+
+config = TableACLConfig(
+    role_table_map={
+        "analyst": ["sales", "products"],  # Analyst can access these tables
+        "admin": ["*"],                     # Admin can access all tables
+    },
+    default_allow_no_mapping=False,  # Deny access if no role mapping
+)
+
+acl = TableACL(config)
+ctx = SecurityContext(user_id="user1", roles=["analyst"])
+
+# Get allowed tables
+allowed = acl.get_allowed_tables(["sales", "products", "users"], ctx)
+# Returns: ["sales", "products"]
+
+# Validate query tables
+is_valid, unauthorized = acl.validate_query_tables(["sales", "users"], ctx)
+# Returns: (False, ["users"])
+```
+
+**Enabling ACL:**
+```python
+from security import ACLConfig, ACLFilter, SecurityContext
+
+# Enable document ACL filtering
+acl_config = ACLConfig(
+    enforce_document_acl=True,       # Enable document ACL
+    enforce_table_acl=True,          # Enable table ACL
+    default_allow_empty_acl=True,    # Docs without ACL are public
+)
+
+acl_filter = ACLFilter(acl_config)
+ctx = SecurityContext(user_id="user1", roles=["reader"])
+
+# Filter retrieval results
+filtered = acl_filter.filter_results(results, ctx)
+```
+
+**Audit Logging:**
+All routing decisions and access denials are logged to `data/logs/audit.jsonl`:
+```json
+{"event_type": "route_decision", "timestamp": "2026-01-27T...", "user_id": "user1", "roles": ["analyst"], "query_type": "documents", "confidence": 0.85, "reasoning": "..."}
+{"event_type": "access_denied", "timestamp": "2026-01-27T...", "user_id": "user1", "roles": ["reader"], "resource_type": "table", "resource_id": "secret_data", "reason": "User lacks admin role"}
+```
+
+**Security Configuration Defaults:**
+- Document ACL: Disabled (`enforce_document_acl=False`)
+- Table ACL: Disabled (`enforce_table_acl=False`)
+- Empty ACL behavior: Allow (`default_allow_empty_acl=True`)
+- Audit logging: Enabled
+
 ### Migration Notes
 
 #### BM25 Lexical Search (PR #123)
@@ -1088,3 +1266,12 @@ result = chain.query("What tables are available?")
   python -m scripts.ingest --input-dir data/raw --output-dir data/processed --verbose
   python -m scripts.index_chunks --processed-dir data/processed --chroma-dir data/vectorstore --verbose
   ```
+
+#### Question Router & ACL (PR #126)
+- **New feature**: Unified query endpoint with automatic routing and ACL support
+- **New packages**: `router/` for question classification, `security/` for ACL filtering
+- **New endpoint**: `POST /api/unified-query` - auto-routes to RAG, SQL, or both
+- **Backward compatibility**: ACL is disabled by default; existing endpoints unchanged
+- **Audit logging**: Routing decisions logged to `data/logs/audit.jsonl`
+- **To enable ACL**: Configure `ACLConfig(enforce_document_acl=True)` and/or `TableACLConfig`
+- **Document ACL**: Set `acl_read` metadata field during ingestion with list of allowed roles
