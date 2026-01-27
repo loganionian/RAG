@@ -1,9 +1,11 @@
 import { useState, useCallback } from 'react';
 import { MessageSquare } from 'lucide-react';
 import { useApi } from '../../hooks/useApi';
-import type { QueryResponse } from '../../types/api';
+import type { QueryResponse, AgentResponse } from '../../types/api';
 import { MessageList, type ChatMessage } from './MessageList';
 import { ChatInput } from './ChatInput';
+import { AgentSelector } from './AgentSelector';
+import { ChatHeader } from './ChatHeader';
 
 const EXAMPLE_QUESTIONS = [
   'What are the key findings in the documents?',
@@ -13,6 +15,7 @@ const EXAMPLE_QUESTIONS = [
 
 export function Chat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [selectedAgent, setSelectedAgent] = useState<AgentResponse | null>(null);
   const api = useApi<QueryResponse>();
 
   const handleSubmit = useCallback(
@@ -24,7 +27,11 @@ export function Chat() {
       };
       setMessages((prev) => [...prev, userMessage]);
 
-      const response = await api.post('/api/query', { question, k: 5 });
+      const payload: { question: string; k: number; agent_id?: string } = { question, k: 5 };
+      if (selectedAgent) {
+        payload.agent_id = selectedAgent.id;
+      }
+      const response = await api.post('/api/query', payload);
 
       if (response) {
         const assistantMessage: ChatMessage = {
@@ -43,7 +50,7 @@ export function Chat() {
         setMessages((prev) => [...prev, errorMessage]);
       }
     },
-    [api]
+    [api, selectedAgent]
   );
 
   const handleExampleClick = (question: string) => {
@@ -53,6 +60,13 @@ export function Chat() {
   if (messages.length === 0) {
     return (
       <div className="flex h-full flex-col">
+        <div className="border-b border-gray-200 bg-white px-4 py-3 dark:border-gray-700 dark:bg-gray-800">
+          <AgentSelector
+            selectedAgentId={selectedAgent?.id || null}
+            onSelectAgent={setSelectedAgent}
+            disabled={api.loading}
+          />
+        </div>
         <div className="flex flex-1 flex-col items-center justify-center p-4">
           <div className="flex h-16 w-16 items-center justify-center rounded-full bg-primary-100 dark:bg-primary-900/30">
             <MessageSquare className="h-8 w-8 text-primary-600 dark:text-primary-400" />
@@ -86,6 +100,7 @@ export function Chat() {
 
   return (
     <div className="flex h-full flex-col">
+      <ChatHeader agent={selectedAgent} />
       <MessageList messages={messages} isLoading={api.loading} />
       <ChatInput onSubmit={handleSubmit} isLoading={api.loading} />
     </div>

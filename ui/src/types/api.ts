@@ -6,6 +6,7 @@
 export interface QueryRequest {
   question: string;
   k?: number;
+  agent_id?: string;
 }
 
 /** Information about a retrieved source chunk */
