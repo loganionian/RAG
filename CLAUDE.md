@@ -100,6 +100,9 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 
 ### Package Structure
 
+**core/** - Early initialization (must be imported first in all entry points)
+- `tiktoken_init.py`: Configures `TIKTOKEN_CACHE_DIR` for offline tiktoken usage
+
 **ingestion/** - Document parsing and chunking
 - `loader.py`: Multi-format document loading (PDF via PyPDF2, DOC via antiword/win32com, DOCX via python-docx, Excel via openpyxl, CSV/TSV via csv module)
 - `chunker.py`: Paragraph-aware chunking (~400 tokens, 80-token overlap)
@@ -380,7 +383,24 @@ set EMBEDDING_MODEL_PATH=models/sentence-transformers_all-MiniLM-L6-v2
 
 ### Tiktoken Cache (Offline/Corporate Environments)
 
-The tiktoken library (used for token counting) downloads encoding files at runtime. For environments with SSL issues or no internet access, pre-download the cache:
+The tiktoken library (used for token counting) downloads encoding files at runtime. For environments with SSL issues (corporate TLS-intercepting proxies like Zscaler, BlueCoat) or no internet access, pre-download the cache.
+
+**Architecture:**
+```
+Entry Points (scripts/ingest.py, api/main.py, etc.)
+    ↓ (first import)
+core/tiktoken_init.py
+    ↓ finds models/tiktoken_cache/
+    ↓ sets TIKTOKEN_CACHE_DIR (absolute path)
+import tiktoken (anywhere in codebase)
+    ↓ uses local cache ✓
+```
+
+All entry points import `core` module first, which:
+1. Finds project root by checking for `pyproject.toml`, `requirements.txt`, `models/`, `CLAUDE.md`
+2. Validates cache files exist and have valid size (>100KB)
+3. Sets `TIKTOKEN_CACHE_DIR` environment variable with absolute path
+4. Logs debug messages for troubleshooting
 
 **Download the cache** (from a machine with internet):
 ```bash
@@ -399,12 +419,19 @@ python -m scripts.download_tiktoken_cache --output-dir models/tiktoken_cache --s
 
 **The cache will be saved to:** `models/tiktoken_cache/`
 
-**Usage:** The code automatically detects the local cache in `models/tiktoken_cache/` directory. No configuration changes needed.
+**Usage:** The `core` module automatically detects and configures the local cache at startup. No manual configuration needed.
 
-**Manual override:** Set environment variable:
+**Manual override:** Set environment variable (takes precedence over auto-detection):
 ```bash
-set TIKTOKEN_CACHE_DIR=models/tiktoken_cache
+set TIKTOKEN_CACHE_DIR=C:\path\to\tiktoken_cache
 ```
+
+**Troubleshooting:**
+If tiktoken still tries to download files:
+1. Verify cache exists: `dir models\tiktoken_cache` should show `9b5ad71b2ce5302211f9c61530b329a4922fc6a4`
+2. Verify file size: Should be ~1.6 MB for cl100k_base
+3. Enable debug logging to see cache detection: `set PYTHONLOGGING=DEBUG`
+4. Check env var is set: `python -c "import os; import core; print(os.environ.get('TIKTOKEN_CACHE_DIR'))"`
 
 **Available encodings:**
 - `cl100k_base` (default) - Used by GPT-4, GPT-3.5-turbo
@@ -1275,3 +1302,12 @@ All routing decisions and access denials are logged to `data/logs/audit.jsonl`:
 - **Audit logging**: Routing decisions logged to `data/logs/audit.jsonl`
 - **To enable ACL**: Configure `ACLConfig(enforce_document_acl=True)` and/or `TableACLConfig`
 - **Document ACL**: Set `acl_read` metadata field during ingestion with list of allowed roles
+
+#### Tiktoken Cache Initialization (Issue #132)
+- **New package**: `core/` for early initialization code
+- **New module**: `core/tiktoken_init.py` - centralized tiktoken cache configuration
+- **Problem solved**: SSL errors in corporate environments with TLS-intercepting proxies
+- **Backward compatibility**: Existing `TIKTOKEN_CACHE_DIR` env var still works and takes precedence
+- **Changes to entry points**: All scripts and API server now import `core` first
+- **Removed**: `_configure_tiktoken_cache()` function from `ingestion/text_utils.py`
+- **No action required**: Cache auto-detection now works reliably for all entry points

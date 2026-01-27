@@ -5,6 +5,8 @@ to help users find relevant data sources.
 """
 from __future__ import annotations
 
+import core  # noqa: F401  # Initialize tiktoken cache before other imports
+
 import argparse
 import json
 import logging
