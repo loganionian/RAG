@@ -1,10 +1,11 @@
 import { NavLink } from 'react-router-dom';
-import { MessageSquare, FileText, Menu, X } from 'lucide-react';
+import { MessageSquare, FileText, Bot, Menu, X } from 'lucide-react';
 import { useState } from 'react';
 
 const navItems = [
   { to: '/', icon: MessageSquare, label: 'Chat' },
   { to: '/documents', icon: FileText, label: 'Documents' },
+  { to: '/agents', icon: Bot, label: 'Agents' },
 ];
 
 export function Sidebar() {

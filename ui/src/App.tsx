@@ -3,6 +3,7 @@ import { useEffect, useCallback, useState } from 'react';
 import { Header, Sidebar, Container } from './components/Layout';
 import { Chat } from './components/Chat';
 import { Documents } from './components/Documents';
+import { Agents } from './components/Agents';
 import type { HealthResponse } from './types/api';
 
 function App() {
@@ -40,6 +41,7 @@ function App() {
         <Routes>
           <Route path="/" element={<Chat />} />
           <Route path="/documents" element={<Documents />} />
+          <Route path="/agents" element={<Agents />} />
         </Routes>
       </Container>
     </div>

@@ -81,3 +81,45 @@ export interface ErrorResponse {
   detail: string;
   error_type: string;
 }
+
+/** Request model for creating an agent */
+export interface AgentCreate {
+  name: string;
+  description?: string;
+  system_prompt: string;
+  temperature?: number | null;
+  max_tokens?: number | null;
+}
+
+/** Request model for updating an agent */
+export interface AgentUpdate {
+  name?: string;
+  description?: string;
+  system_prompt?: string;
+  temperature?: number | null;
+  max_tokens?: number | null;
+}
+
+/** Response model for agent data */
+export interface AgentResponse {
+  id: string;
+  name: string;
+  description: string | null;
+  system_prompt: string;
+  temperature: number | null;
+  max_tokens: number | null;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Response model for agents list endpoint */
+export interface AgentsListResponse {
+  agents: AgentResponse[];
+  total: number;
+}
+
+/** Response model for agent deletion */
+export interface AgentDeleteResponse {
+  deleted: boolean;
+}
