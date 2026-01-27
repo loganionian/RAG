@@ -13,6 +13,10 @@ class QueryRequest(BaseModel):
 
     question: str = Field(..., description="The question to ask the RAG system")
     k: int = Field(default=5, ge=1, le=20, description="Number of chunks to retrieve")
+    agent_id: Optional[str] = Field(
+        default=None,
+        description="Optional agent ID for custom system prompt and parameters",
+    )
 
 
 class SourceInfo(BaseModel):
@@ -30,6 +34,9 @@ class QueryMetadata(BaseModel):
 
     retrieval_time_ms: float = Field(..., description="Time spent on retrieval in milliseconds")
     generation_time_ms: float = Field(..., description="Time spent on generation in milliseconds")
+    agent_id: Optional[str] = Field(
+        default=None, description="Agent ID used for this query (if any)"
+    )
 
 
 class QueryResponse(BaseModel):

@@ -3,17 +3,24 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException
 
 from api.schemas import QueryMetadata, QueryRequest, QueryResponse, SourceInfo
+from storage import AgentCatalog, SQLStore, SQLStoreConfig
 
 if TYPE_CHECKING:
     from generation.rag_chain import RAGChain
 
 logger = logging.getLogger(__name__)
+
+# Default database path (can be overridden via environment variable)
+VECTORSTORE_DIR = Path(os.getenv("VECTORSTORE_DIR", "data/vectorstore"))
+DB_PATH = VECTORSTORE_DIR / "catalog.duckdb"
 
 router = APIRouter(prefix="/api", tags=["query"])
 
@@ -37,14 +44,61 @@ def get_rag_chain() -> "RAGChain":
     return _rag_chain
 
 
+def _get_catalog() -> AgentCatalog:
+    """Get an initialized AgentCatalog instance.
+
+    Returns:
+        AgentCatalog connected to the database.
+    """
+    config = SQLStoreConfig(db_path=DB_PATH)
+    sql_store = SQLStore(config)
+    catalog = AgentCatalog(sql_store)
+    catalog.init_catalog()
+    return catalog
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query_rag(request: QueryRequest) -> QueryResponse:
     """Query the RAG system with a question.
 
     Retrieves relevant chunks from the vectorstore and generates an answer
     using the configured LLM provider.
+
+    If an agent_id is provided, the agent's system prompt, temperature, and
+    max_tokens settings will be used instead of the defaults.
     """
     rag_chain = get_rag_chain()
+
+    # Determine generation parameters (agent overrides or defaults)
+    system_prompt_template = rag_chain.config.system_prompt
+    temperature = rag_chain.config.temperature
+    max_tokens = rag_chain.config.max_tokens
+    agent_id_used = None
+
+    if request.agent_id:
+        try:
+            catalog = _get_catalog()
+            agent = catalog.get_by_id(request.agent_id)
+            if agent is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Agent not found: {request.agent_id}",
+                )
+            # Apply agent overrides
+            system_prompt_template = agent.system_prompt
+            if agent.temperature is not None:
+                temperature = agent.temperature
+            if agent.max_tokens is not None:
+                max_tokens = agent.max_tokens
+            agent_id_used = request.agent_id
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Failed to fetch agent %s", request.agent_id)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch agent: {e}",
+            ) from e
 
     try:
         # Measure retrieval time separately
@@ -55,12 +109,12 @@ async def query_rag(request: QueryRequest) -> QueryResponse:
         # Build context and generate (LLM call only)
         generation_start = time.perf_counter()
         context = rag_chain._format_context(retrieval_result)
-        system_prompt = rag_chain.config.system_prompt.format(context=context)
+        system_prompt = system_prompt_template.format(context=context)
         answer = rag_chain.llm_client.generate(
             prompt=request.question,
             system_prompt=system_prompt,
-            max_tokens=rag_chain.config.max_tokens,
-            temperature=rag_chain.config.temperature,
+            max_tokens=max_tokens,
+            temperature=temperature,
         )
         generation_time_ms = (time.perf_counter() - generation_start) * 1000
 
@@ -97,6 +151,7 @@ async def query_rag(request: QueryRequest) -> QueryResponse:
         query_metadata = QueryMetadata(
             retrieval_time_ms=round(retrieval_time_ms, 2),
             generation_time_ms=round(generation_time_ms, 2),
+            agent_id=agent_id_used,
         )
 
         return QueryResponse(
@@ -105,6 +160,8 @@ async def query_rag(request: QueryRequest) -> QueryResponse:
             metadata=query_metadata,
         )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Query failed: %s", request.question[:50])
         raise HTTPException(
