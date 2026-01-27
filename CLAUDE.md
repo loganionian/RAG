@@ -53,6 +53,24 @@ python -m scripts.rag_chat -q "What skills are in demand?" --show-sources
 python -m scripts.rag_chat -q "Summarize the report" --json
 ```
 
+### SQL Chat (Query Tables with Natural Language)
+```bash
+# Single question
+python -m scripts.sql_chat -q "What tables are available?"
+
+# Interactive mode
+python -m scripts.sql_chat --interactive
+
+# Show generated SQL
+python -m scripts.sql_chat -q "Top 5 products by price" --show-sql
+
+# JSON output
+python -m scripts.sql_chat -q "Count rows per table" --json
+
+# List available tables
+python -m scripts.sql_chat --list-tables
+```
+
 ### REST API Server
 ```bash
 # Start the API server (default: http://localhost:8080)
@@ -117,6 +135,15 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 - `routes/query.py`: POST /api/query endpoint
 - `routes/ingest.py`: POST /api/ingest endpoint
 - `routes/documents.py`: GET /api/documents, GET /api/health endpoints
+- `routes/sql_query.py`: POST /api/sql-query, GET /api/sql-tables endpoints
+
+**sql_agent/** - Natural language to SQL agent
+- `config.py`: `SQLAgentConfig` with database settings and guardrails
+- `errors.py`: Custom exceptions (`QueryValidationError`, `QueryGenerationError`, `QueryExecutionError`)
+- `query_validator.py`: `QueryValidator` for SELECT-only validation and auto-LIMIT
+- `schema_extractor.py`: `SchemaExtractor` for database schema extraction
+- `sql_generator.py`: `SQLGenerator` for LLM-based SQL generation
+- `sql_chain.py`: `SQLChain` orchestrates generation → validation → execution → summarization
 
 **scripts/** - CLI entry points for each pipeline stage
 
@@ -906,6 +933,140 @@ HTTP Status Codes:
 - `404`: Resource not found
 - `500`: Internal server error
 - `503`: Service unavailable (RAG not initialized)
+
+### SQL Agent
+
+The SQL Agent allows natural language queries against tabular data stored in DuckDB. It translates questions into SQL, executes them with SELECT-only guardrails, and returns results with natural language summaries.
+
+**Architecture:**
+```
+User Question → SQLChain.query()
+                    │
+        ┌───────────┴───────────┐
+        ▼                       ▼
+  SchemaExtractor          SQLGenerator
+  (get table schemas)      (LLM → SQL)
+        │                       │
+        └───────────┬───────────┘
+                    ▼
+              QueryValidator
+              (SELECT-only check)
+                    │
+                    ▼
+              DuckDB Execute
+                    │
+                    ▼
+              Answer Generator
+              (LLM summarize results)
+```
+
+**Safety Guardrails:**
+- **Read-only mode**: Database is always opened in read-only mode
+- **SELECT-only**: Only SELECT and WITH (CTEs) queries are allowed
+- **Blocked operations**: INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE, SET, GRANT, etc.
+- **Excluded tables**: System tables (`_agents`, `_ingestion_catalog`) are blocked
+- **No SQL comments**: `--` and `/* */` comments are rejected
+- **No file operations**: `read_csv()`, `read_parquet()`, etc. are blocked
+- **Auto-LIMIT**: Queries without LIMIT automatically get `LIMIT 100`
+
+**CLI Usage:**
+```bash
+# Single question
+python -m scripts.sql_chat -q "What tables are available?"
+
+# Interactive mode
+python -m scripts.sql_chat --interactive
+
+# Show generated SQL
+python -m scripts.sql_chat -q "Top 5 products by revenue" --show-sql
+
+# JSON output
+python -m scripts.sql_chat -q "Count by category" --json
+
+# List available tables
+python -m scripts.sql_chat --list-tables
+
+# Custom database path
+python -m scripts.sql_chat -q "List tables" --db-path data/vectorstore/catalog.duckdb
+```
+
+**API Usage:**
+```bash
+# Query with natural language
+curl -X POST http://localhost:8080/api/sql-query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What are the top 5 products by revenue?", "max_rows": 100}'
+
+# Show generated SQL in response
+curl -X POST http://localhost:8080/api/sql-query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "Count products by category", "show_sql": true}'
+
+# List available tables
+curl http://localhost:8080/api/sql-tables
+```
+
+**API Response:**
+```json
+{
+  "answer": "The top 5 products by revenue are...",
+  "data": [
+    {"product": "Widget", "revenue": 10000},
+    {"product": "Gadget", "revenue": 8000}
+  ],
+  "columns": ["product", "revenue"],
+  "row_count": 5,
+  "generated_sql": "SELECT product, SUM(revenue) as revenue FROM sales GROUP BY product ORDER BY revenue DESC LIMIT 5",
+  "metadata": {
+    "generation_time_ms": 450.2,
+    "execution_time_ms": 12.5,
+    "summarization_time_ms": 800.0,
+    "tables_used": ["sales"]
+  }
+}
+```
+
+**Error Handling:**
+| Exception | HTTP Status | Scenario |
+|-----------|-------------|----------|
+| `QueryValidationError` | 400 | Non-SELECT query, forbidden operations, excluded tables |
+| `QueryGenerationError` | 400 | LLM cannot answer, invalid SQL syntax |
+| `QueryExecutionError` | 500 | DuckDB execution error |
+| `HTTPException(503)` | 503 | SQL agent not initialized |
+
+**Health Check:**
+The `/api/health` endpoint includes SQL Agent status:
+```json
+{
+  "sql_agent": {
+    "healthy": true,
+    "message": "SQL Agent healthy. 5 tables, 12345 total rows.",
+    "table_count": 5,
+    "total_rows": 12345
+  }
+}
+```
+
+**Configuration:**
+```python
+from sql_agent import SQLAgentConfig, SQLChain
+
+config = SQLAgentConfig(
+    db_path=Path("data/vectorstore/catalog.duckdb"),
+    read_only=True,                    # Always forced to True
+    excluded_tables=["_agents", "_ingestion_catalog"],
+    max_rows_preview=3,                # Sample rows in schema prompt
+    max_result_rows=100,               # Max rows returned
+    query_timeout=30,                  # Execution timeout (seconds)
+    max_tokens=500,                    # LLM response tokens
+    temperature=0.0,                   # Deterministic SQL generation
+    auto_limit=True,                   # Auto-add LIMIT if missing
+    default_limit=100,                 # Default LIMIT value
+)
+
+chain = SQLChain(llm_client, config)
+result = chain.query("What tables are available?")
+```
 
 ### Migration Notes
 

@@ -97,6 +97,9 @@ class HealthResponse(BaseModel):
     bm25_index: Optional[dict] = Field(
         default=None, description="BM25 lexical index health details (if enabled)"
     )
+    sql_agent: Optional[dict] = Field(
+        default=None, description="SQL Agent health details (if enabled)"
+    )
 
 
 class ErrorResponse(BaseModel):
@@ -185,3 +188,50 @@ class AgentDeleteResponse(BaseModel):
     """Response model for agent deletion."""
 
     deleted: bool = Field(..., description="Whether the agent was deleted")
+
+
+# ============================================================================
+# SQL Query Schemas
+# ============================================================================
+
+
+class SQLQueryRequest(BaseModel):
+    """Request model for SQL query endpoint."""
+
+    question: str = Field(..., description="Natural language question to query the database")
+    max_rows: int = Field(
+        default=100, ge=1, le=1000, description="Maximum rows to return"
+    )
+    show_sql: bool = Field(
+        default=False, description="Include generated SQL in response"
+    )
+
+
+class SQLQueryMetadata(BaseModel):
+    """Metadata about SQL query execution."""
+
+    generation_time_ms: float = Field(
+        ..., description="Time spent generating SQL in milliseconds"
+    )
+    execution_time_ms: float = Field(
+        ..., description="Time spent executing query in milliseconds"
+    )
+    summarization_time_ms: float = Field(
+        default=0.0, description="Time spent generating answer in milliseconds"
+    )
+    tables_used: list[str] = Field(
+        default_factory=list, description="Tables referenced in the query"
+    )
+
+
+class SQLQueryResponse(BaseModel):
+    """Response model for SQL query endpoint."""
+
+    answer: str = Field(..., description="Natural language answer to the question")
+    data: list[dict] = Field(default_factory=list, description="Query result rows")
+    columns: list[str] = Field(default_factory=list, description="Column names")
+    row_count: int = Field(..., description="Number of rows returned")
+    generated_sql: Optional[str] = Field(
+        default=None, description="Generated SQL query (if show_sql=true)"
+    )
+    metadata: SQLQueryMetadata = Field(..., description="Query execution metadata")

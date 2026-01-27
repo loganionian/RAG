@@ -129,6 +129,41 @@ async def health_check_endpoint() -> HealthResponse:
         logger.warning("BM25 health check failed: %s", e)
         bm25_status = {"healthy": False, "message": str(e)}
 
+    # Check SQL Agent health
+    sql_agent_status = None
+    db_path = VECTORSTORE_DIR / "catalog.duckdb"
+    if db_path.exists():
+        try:
+            from sql_agent import SQLAgentConfig, SQLChain
+            from sql_agent.sql_chain import SQLHealthCheckResult
+
+            # Create a temporary chain just for health check
+            # (we don't need an LLM client for basic health check)
+            from sql_agent.schema_extractor import SchemaExtractor
+
+            sql_config = SQLAgentConfig(db_path=db_path)
+            extractor = SchemaExtractor(sql_config)
+            stats = extractor.get_statistics()
+            extractor.close()
+
+            if stats["table_count"] > 0:
+                sql_agent_status = {
+                    "healthy": True,
+                    "message": f"SQL Agent healthy. {stats['table_count']} tables, {stats['total_rows']:,} total rows.",
+                    "table_count": stats["table_count"],
+                    "total_rows": stats["total_rows"],
+                }
+            else:
+                sql_agent_status = {
+                    "healthy": True,
+                    "message": "SQL Agent healthy but no user tables found.",
+                    "table_count": 0,
+                    "total_rows": 0,
+                }
+        except Exception as e:
+            logger.warning("SQL Agent health check failed: %s", e)
+            sql_agent_status = {"healthy": False, "message": str(e)}
+
     # Overall status
     overall_status = "healthy" if vs_result.healthy else "degraded"
 
@@ -137,4 +172,5 @@ async def health_check_endpoint() -> HealthResponse:
         vectorstore=vectorstore_status,
         llm_provider=llm_status,
         bm25_index=bm25_status,
+        sql_agent=sql_agent_status,
     )

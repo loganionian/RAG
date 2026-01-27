@@ -13,8 +13,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routes import agents_router, documents_router, ingest_router, query_router
+from api.routes import agents_router, documents_router, ingest_router, query_router, sql_query_router
 from api.routes.query import set_rag_chain
+from api.routes.sql_query import set_sql_chain
 from api.schemas import ErrorResponse
 
 # Load environment variables
@@ -48,6 +49,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             rag_chain = RAGChain(llm_client, rag_config)
             set_rag_chain(rag_chain)
             logger.info("RAG chain initialized successfully")
+
+            # Initialize SQL chain if database exists
+            db_path = VECTORSTORE_DIR / "catalog.duckdb"
+            if db_path.exists():
+                try:
+                    from sql_agent import SQLAgentConfig, SQLChain
+
+                    sql_config = SQLAgentConfig(db_path=db_path)
+                    sql_chain = SQLChain(llm_client, sql_config)
+                    set_sql_chain(sql_chain)
+                    logger.info("SQL Agent initialized successfully")
+                except Exception as e:
+                    logger.warning("Failed to initialize SQL Agent: %s", e)
+                    logger.info("SQL query endpoint will be unavailable")
+            else:
+                logger.info("DuckDB database not found at %s, SQL Agent not initialized", db_path)
+
         except Exception as e:
             logger.warning("Failed to initialize RAG chain: %s", e)
             logger.info("Query endpoint will be unavailable until RAG chain is configured")
@@ -83,6 +101,7 @@ app.include_router(agents_router)
 app.include_router(documents_router)
 app.include_router(query_router)
 app.include_router(ingest_router)
+app.include_router(sql_query_router)
 
 
 @app.exception_handler(Exception)
