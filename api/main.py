@@ -23,7 +23,7 @@ from api.routes import (
 )
 from api.routes.query import set_rag_chain
 from api.routes.sql_query import set_sql_chain
-from api.routes.unified_query import set_unified_components
+from api.routes.unified_query import set_orchestrator, set_unified_components
 from api.schemas import ErrorResponse
 
 # Load environment variables
@@ -84,8 +84,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Vectorstore directory does not exist: %s", VECTORSTORE_DIR)
         logger.info("Run ingestion and indexing pipelines first")
 
-    # Initialize unified query components
+    # Initialize unified query components and orchestrator
     try:
+        from orchestrator import RAGOrchestrator
         from router import QuestionClassifier, RouterConfig
         from security import ACLConfig, ACLFilter, AuditLogger, TableACL, TableACLConfig
 
@@ -107,7 +108,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # Create audit logger
         audit_logger = AuditLogger(enabled=True)
 
-        # Set unified components
+        # Set unified components (for backward compatibility / fallback)
         set_unified_components(
             rag_chain=rag_chain,
             sql_chain=sql_chain,
@@ -116,7 +117,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             table_acl=table_acl,
             audit_logger=audit_logger,
         )
-        logger.info("Unified query components initialized successfully")
+
+        # Create and set the orchestrator
+        llm_client = rag_chain.llm_client if rag_chain else None
+        orchestrator = RAGOrchestrator(
+            rag_chain=rag_chain,
+            sql_chain=sql_chain,
+            classifier=classifier,
+            llm_client=llm_client,
+            acl_filter=acl_filter,
+            table_acl=table_acl,
+            audit_logger=audit_logger,
+        )
+        set_orchestrator(orchestrator)
+        logger.info("Orchestrator initialized successfully")
 
     except Exception as e:
         logger.warning("Failed to initialize unified query components: %s", e)

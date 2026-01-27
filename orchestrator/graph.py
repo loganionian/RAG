@@ -29,7 +29,7 @@ from .nodes import (
     sql_agent_node,
     synthesizer_node,
 )
-from .state import GraphState, create_initial_state
+from .state import GraphState, StateValidator, create_initial_state
 
 if TYPE_CHECKING:
     from generation.base import BaseLLMClient
@@ -90,10 +90,61 @@ class RAGOrchestrator:
         self.table_acl = table_acl
         self.audit_logger = audit_logger
         self.config = config or OrchestratorConfig()
+        self.validator = StateValidator(strict=False)
 
         # Build the graph
         self._graph = self._build_graph()
         self._compiled_graph = self._graph.compile()
+
+    def _wrap_with_validation(
+        self,
+        node_name: str,
+        node_fn: callable,
+    ) -> callable:
+        """Wrap a node function with entry/exit validation.
+
+        Validation failures are logged as warnings and add recoverable
+        errors to the state, but do not abort execution.
+
+        Args:
+            node_name: Name of the node for validation context.
+            node_fn: The node function to wrap.
+
+        Returns:
+            Wrapped function that performs validation.
+        """
+        def validated_node(state: GraphState) -> dict:
+            # Entry validation
+            entry_result = self.validator.validate_entry(node_name, state)
+            if not entry_result.passed:
+                logger.warning("Validation failed: %s", entry_result.message)
+                if not entry_result.recoverable:
+                    # Non-recoverable - add error and return without executing
+                    from .state import NodeError
+                    error = entry_result.to_node_error(node_name)
+                    return {
+                        "errors": state.get("errors", []) + [error],
+                    }
+
+            # Execute the node
+            result = node_fn(state)
+
+            # Merge result into state for exit validation
+            merged_state = {**state, **result}
+
+            # Exit validation
+            exit_result = self.validator.validate_exit(node_name, merged_state)
+            if not exit_result.passed:
+                logger.warning("Validation failed: %s", exit_result.message)
+                # Add validation error to result
+                from .state import NodeError
+                error = exit_result.to_node_error(node_name)
+                existing_errors = result.get("errors", state.get("errors", []))
+                result["errors"] = existing_errors + [error]
+
+            return result
+
+        return validated_node
 
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph state graph.
@@ -127,6 +178,12 @@ class RAGOrchestrator:
             synthesizer_node,
             llm_client=self.llm_client,
         )
+
+        # Wrap node functions with validation
+        router_fn = self._wrap_with_validation("router", router_fn)
+        docs_fn = self._wrap_with_validation("docs_agent", docs_fn)
+        sql_fn = self._wrap_with_validation("sql_agent", sql_fn)
+        synth_fn = self._wrap_with_validation("synthesizer", synth_fn)
 
         # Add nodes
         graph.add_node("router", router_fn)

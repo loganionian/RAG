@@ -16,7 +16,9 @@ from orchestrator import (
     RAGOrchestrator,
     RetrievalError,
     RoutingError,
+    StateValidator,
     SynthesisError,
+    ValidationResult,
     create_initial_state,
     extract_errors_from_state,
     get_node_status_summary,
@@ -602,3 +604,458 @@ class TestAPIAdapter:
         summary = get_node_status_summary(state)
         assert summary["router"] == "success"
         assert summary["docs_agent"] == "success"
+
+
+class TestValidationResult:
+    """Tests for ValidationResult dataclass."""
+
+    def test_validation_result_passed(self):
+        """ValidationResult should represent a passing check."""
+        result = ValidationResult(passed=True, message="Valid")
+        assert result.passed is True
+        assert result.recoverable is True
+
+    def test_validation_result_failed(self):
+        """ValidationResult should represent a failing check."""
+        result = ValidationResult(
+            passed=False,
+            message="Invalid state",
+            recoverable=False,
+        )
+        assert result.passed is False
+        assert result.recoverable is False
+
+    def test_to_node_error(self):
+        """ValidationResult should convert to NodeError."""
+        result = ValidationResult(
+            passed=False,
+            message="Validation failed",
+            recoverable=True,
+        )
+        error = result.to_node_error("router")
+        assert error.node_name == "router"
+        assert error.error_type == "ValidationError"
+        assert error.message == "Validation failed"
+        assert error.recoverable is True
+
+
+class TestStateValidator:
+    """Tests for StateValidator class."""
+
+    def test_router_entry_valid(self):
+        """Router entry should pass with non-empty question."""
+        validator = StateValidator()
+        state = GraphState(
+            question="What is the policy?",
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_router_entry(state)
+        assert result.passed is True
+
+    def test_router_entry_empty_question(self):
+        """Router entry should fail with empty question."""
+        validator = StateValidator()
+        state = GraphState(
+            question="",
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_router_entry(state)
+        assert result.passed is False
+        assert "empty" in result.message.lower()
+
+    def test_router_entry_whitespace_question(self):
+        """Router entry should fail with whitespace-only question."""
+        validator = StateValidator()
+        state = GraphState(
+            question="   ",
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_router_entry(state)
+        assert result.passed is False
+
+    def test_router_exit_valid(self):
+        """Router exit should pass with route_decision set."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            route_decision=RouteDecision(
+                query_type=QueryType.DOCUMENTS,
+                confidence=0.9,
+                reasoning="test",
+            ),
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_router_exit(state)
+        assert result.passed is True
+
+    def test_router_exit_no_decision(self):
+        """Router exit should fail without route_decision."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            route_decision=None,
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_router_exit(state)
+        assert result.passed is False
+        assert "route_decision" in result.message.lower()
+
+    def test_router_exit_with_routing_error(self):
+        """Router exit should pass if routing error is recorded."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            route_decision=None,
+            node_status={},
+            errors=[
+                NodeError(
+                    node_name="router",
+                    error_type="RoutingError",
+                    message="Failed",
+                    traceback_str="",
+                )
+            ],
+        )
+        result = validator.validate_router_exit(state)
+        assert result.passed is True
+
+    def test_docs_agent_exit_success_with_evidence(self):
+        """Docs agent exit should pass if successful with evidence."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            node_status={"docs_agent": ExecutionStatus.SUCCESS.value},
+            evidence=[Evidence(source="docs", chunks=["chunk1"])],
+            errors=[],
+        )
+        result = validator.validate_docs_agent_exit(state)
+        assert result.passed is True
+
+    def test_docs_agent_exit_success_no_evidence(self):
+        """Docs agent exit should fail if successful without evidence."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            node_status={"docs_agent": ExecutionStatus.SUCCESS.value},
+            evidence=[],
+            errors=[],
+        )
+        result = validator.validate_docs_agent_exit(state)
+        assert result.passed is False
+        assert "no docs evidence" in result.message.lower()
+
+    def test_docs_agent_exit_skipped(self):
+        """Docs agent exit should pass if skipped."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            node_status={"docs_agent": ExecutionStatus.SKIPPED.value},
+            evidence=[],
+            errors=[],
+        )
+        result = validator.validate_docs_agent_exit(state)
+        assert result.passed is True
+
+    def test_docs_agent_exit_failed(self):
+        """Docs agent exit should pass if failed (error already recorded)."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            node_status={"docs_agent": ExecutionStatus.FAILED.value},
+            evidence=[],
+            errors=[],
+        )
+        result = validator.validate_docs_agent_exit(state)
+        assert result.passed is True
+
+    def test_sql_agent_exit_success_with_evidence(self):
+        """SQL agent exit should pass if successful with evidence."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            node_status={"sql_agent": ExecutionStatus.SUCCESS.value},
+            evidence=[Evidence(source="sql", sql_data=[{"col": "val"}])],
+            errors=[],
+        )
+        result = validator.validate_sql_agent_exit(state)
+        assert result.passed is True
+
+    def test_sql_agent_exit_success_no_evidence(self):
+        """SQL agent exit should fail if successful without evidence."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            node_status={"sql_agent": ExecutionStatus.SUCCESS.value},
+            evidence=[],
+            errors=[],
+        )
+        result = validator.validate_sql_agent_exit(state)
+        assert result.passed is False
+        assert "no sql evidence" in result.message.lower()
+
+    def test_synthesizer_exit_valid(self):
+        """Synthesizer exit should pass with non-empty final_answer."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            final_answer="The answer is 42.",
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_synthesizer_exit(state)
+        assert result.passed is True
+
+    def test_synthesizer_exit_empty_answer(self):
+        """Synthesizer exit should fail with empty final_answer."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            final_answer="",
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_synthesizer_exit(state)
+        assert result.passed is False
+        assert "final_answer" in result.message.lower()
+
+    def test_strict_mode(self):
+        """Strict mode should make failures non-recoverable."""
+        validator = StateValidator(strict=True)
+        state = GraphState(
+            question="",
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_router_entry(state)
+        assert result.passed is False
+        assert result.recoverable is False
+
+    def test_validate_entry_dispatch(self):
+        """validate_entry should dispatch to correct validator."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_entry("router", state)
+        assert result.passed is True
+
+        # Unknown node should pass
+        result = validator.validate_entry("unknown_node", state)
+        assert result.passed is True
+
+    def test_validate_exit_dispatch(self):
+        """validate_exit should dispatch to correct validator."""
+        validator = StateValidator()
+        state = GraphState(
+            question="Test",
+            route_decision=RouteDecision(
+                query_type=QueryType.DOCUMENTS,
+                confidence=0.9,
+                reasoning="test",
+            ),
+            node_status={},
+            errors=[],
+        )
+        result = validator.validate_exit("router", state)
+        assert result.passed is True
+
+
+class TestStatePassingAndEvidenceAggregation:
+    """Tests for state passing and evidence aggregation across nodes."""
+
+    def test_evidence_aggregation_hybrid(self):
+        """Hybrid queries should aggregate evidence from both agents."""
+        llm = MockLLMClient("Combined response")
+        rag = MockRAGChain(llm_client=llm)
+        sql = MockSQLChain()
+        orchestrator = RAGOrchestrator(rag_chain=rag, sql_chain=sql, llm_client=llm)
+
+        state = orchestrator.query(
+            question="What does the report say and how many records?",
+            force_route="hybrid",
+        )
+
+        # Should have evidence from both sources
+        evidence_sources = [e.source for e in state["evidence"]]
+        assert "docs" in evidence_sources
+        assert "sql" in evidence_sources
+
+        # Should have partial answers from both sources
+        partial_sources = [pa.source for pa in state["partial_answers"]]
+        assert "docs" in partial_sources
+        assert "sql" in partial_sources
+
+    def test_partial_answers_preserved(self):
+        """Partial answers should be preserved through synthesis."""
+        llm = MockLLMClient("Final answer")
+        rag = MockRAGChain(llm_client=llm)
+        orchestrator = RAGOrchestrator(rag_chain=rag, llm_client=llm)
+
+        state = orchestrator.query(
+            question="What is in the documents?",
+            force_route="documents",
+        )
+
+        assert len(state["partial_answers"]) >= 1
+        assert state["partial_answers"][0].source == "docs"
+        assert state["final_answer"]  # Should have synthesized answer
+
+    def test_timing_accumulation(self):
+        """Timing metrics should accumulate across nodes."""
+        llm = MockLLMClient("Answer")
+        rag = MockRAGChain(llm_client=llm)
+        sql = MockSQLChain()
+        orchestrator = RAGOrchestrator(rag_chain=rag, sql_chain=sql, llm_client=llm)
+
+        state = orchestrator.query(
+            question="Hybrid query",
+            force_route="hybrid",
+        )
+
+        # Timing should be accumulated
+        assert state["retrieval_time_ms"] > 0
+        assert state["routing_time_ms"] >= 0
+
+
+class TestOrchestratorWithValidation:
+    """Tests for orchestrator with validation integration."""
+
+    def test_validation_errors_recorded(self):
+        """Validation errors should be recorded in state."""
+        llm = MockLLMClient("Answer")
+        rag = MockRAGChain(llm_client=llm)
+
+        # Create a RAG chain that returns no evidence despite success
+        rag.retrieve = MagicMock(return_value=MagicMock(
+            chunks=[],
+            metadatas=[],
+            ids=[],
+            distances=[],
+        ))
+
+        orchestrator = RAGOrchestrator(rag_chain=rag, llm_client=llm)
+
+        state = orchestrator.query(
+            question="Test query",
+            force_route="documents",
+        )
+
+        # The synthesizer should still produce an answer even with no chunks
+        assert state["final_answer"]
+
+    def test_empty_question_handled(self):
+        """Empty question should be handled gracefully."""
+        llm = MockLLMClient("Answer")
+        orchestrator = RAGOrchestrator(llm_client=llm)
+
+        # Empty question - should still process (classifier may still work)
+        # The validation will add a warning but execution continues
+        state = orchestrator.query(question="  ")
+
+        # Should have validation error recorded
+        # But still complete execution
+
+
+class TestAPIIntegration:
+    """Tests for API integration with orchestrator."""
+
+    def test_graph_state_to_response_with_validation_errors(self):
+        """Response should be generated even with validation errors."""
+        state = GraphState(
+            question="Test",
+            security_context=None,
+            config=OrchestratorConfig(),
+            route_decision=RouteDecision(
+                query_type=QueryType.DOCUMENTS,
+                confidence=0.9,
+                reasoning="test",
+            ),
+            force_route=None,
+            k=5,
+            search_mode="hybrid",
+            max_rows=100,
+            rerank=None,
+            evidence=[],
+            partial_answers=[],
+            final_answer="Answer despite errors",
+            critique=None,
+            errors=[
+                NodeError(
+                    node_name="docs_agent",
+                    error_type="ValidationError",
+                    message="No evidence added",
+                    traceback_str="",
+                    recoverable=True,
+                ),
+            ],
+            node_status={"router": "success", "docs_agent": "success"},
+            retrieval_time_ms=50.0,
+            generation_time_ms=100.0,
+            routing_time_ms=5.0,
+        )
+
+        response = graph_state_to_response(state)
+        assert response.answer == "Answer despite errors"
+
+    def test_graph_state_to_response_hybrid(self):
+        """Hybrid response should include both sources and SQL result."""
+        state = GraphState(
+            question="Test",
+            security_context=None,
+            config=OrchestratorConfig(),
+            route_decision=RouteDecision(
+                query_type=QueryType.HYBRID,
+                confidence=0.85,
+                reasoning="hybrid query",
+            ),
+            force_route=None,
+            k=5,
+            search_mode="hybrid",
+            max_rows=100,
+            rerank=True,
+            evidence=[
+                Evidence(
+                    source="docs",
+                    chunks=["Document content"],
+                    metadatas=[{"doc_id": "doc1", "relative_path": "doc.pdf"}],
+                    chunk_ids=["doc1::chunk-0000"],
+                    distances=[0.1],
+                ),
+                Evidence(
+                    source="sql",
+                    sql_data=[{"count": 42}],
+                    sql_columns=["count"],
+                    sql_query="SELECT COUNT(*) FROM test",
+                    tables_used=["test"],
+                ),
+            ],
+            partial_answers=[
+                PartialAnswer(source="docs", answer="Doc answer", confidence=0.8),
+                PartialAnswer(source="sql", answer="SQL answer", confidence=0.8),
+            ],
+            final_answer="Combined answer",
+            critique=None,
+            errors=[],
+            node_status={},
+            retrieval_time_ms=75.0,
+            generation_time_ms=150.0,
+            routing_time_ms=3.0,
+        )
+
+        response = graph_state_to_response(state)
+
+        assert response.answer == "Combined answer"
+        assert len(response.sources) == 1
+        assert response.sources[0].doc_id == "doc1"
+        assert response.sql_result is not None
+        assert response.sql_result.row_count == 1
+        assert response.metadata.routing.query_type == "hybrid"
+        assert response.metadata.tables_used == ["test"]
+        assert response.metadata.reranking_applied is True

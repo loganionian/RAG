@@ -43,6 +43,8 @@ from .state import (
     GraphState,
     NodeError,
     PartialAnswer,
+    StateValidator,
+    ValidationResult,
     create_initial_state,
 )
 
@@ -58,6 +60,8 @@ __all__ = [
     "Evidence",
     "PartialAnswer",
     "CritiqueResult",
+    "ValidationResult",
+    "StateValidator",
     "create_initial_state",
     # Errors
     "OrchestratorError",

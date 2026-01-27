@@ -6,15 +6,18 @@ for tracking execution state through the LangGraph state machine.
 
 from __future__ import annotations
 
+import logging
 import traceback
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Callable, Dict, List, Optional, TypedDict
 
 from router.models import RouteDecision
 from security.config import SecurityContext
 
 from .config import OrchestratorConfig
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionStatus(Enum):
@@ -247,6 +250,241 @@ class GraphState(TypedDict, total=False):
     retrieval_time_ms: float
     generation_time_ms: float
     routing_time_ms: float
+
+
+@dataclass
+class ValidationResult:
+    """Result of a state validation check.
+
+    Attributes:
+        passed: Whether the validation passed.
+        message: Description of what was validated or why it failed.
+        recoverable: Whether execution can continue despite failure.
+    """
+
+    passed: bool
+    message: str
+    recoverable: bool = True
+
+    def to_node_error(self, node_name: str) -> NodeError:
+        """Convert validation failure to NodeError.
+
+        Args:
+            node_name: Name of the node that failed validation.
+
+        Returns:
+            NodeError representing the validation failure.
+        """
+        return NodeError(
+            node_name=node_name,
+            error_type="ValidationError",
+            message=self.message,
+            traceback_str="",
+            recoverable=self.recoverable,
+        )
+
+
+class StateValidator:
+    """Validates graph state at node entry and exit points.
+
+    Performs validation checks to ensure state integrity throughout
+    the orchestration flow. Validation failures are recoverable by
+    default - they log warnings and add errors but don't abort execution.
+
+    Validation rules:
+    - Router entry: question must be non-empty
+    - Router exit: route_decision must be set
+    - Docs agent exit: evidence must be added if execution was successful
+    - SQL agent exit: evidence must be added if execution was successful
+    - Synthesizer exit: final_answer must be non-empty
+    """
+
+    def __init__(self, strict: bool = False) -> None:
+        """Initialize the validator.
+
+        Args:
+            strict: If True, validation failures are non-recoverable.
+        """
+        self.strict = strict
+
+    def validate_router_entry(self, state: "GraphState") -> ValidationResult:
+        """Validate state before router execution.
+
+        Checks that the question is non-empty.
+
+        Args:
+            state: Current graph state.
+
+        Returns:
+            ValidationResult indicating pass/fail.
+        """
+        question = state.get("question", "")
+        if not question or not question.strip():
+            return ValidationResult(
+                passed=False,
+                message="Router entry: question is empty or missing",
+                recoverable=not self.strict,
+            )
+        return ValidationResult(passed=True, message="Router entry: valid")
+
+    def validate_router_exit(self, state: "GraphState") -> ValidationResult:
+        """Validate state after router execution.
+
+        Checks that route_decision is set.
+
+        Args:
+            state: Current graph state.
+
+        Returns:
+            ValidationResult indicating pass/fail.
+        """
+        route_decision = state.get("route_decision")
+        if route_decision is None:
+            # Check if there's a routing error
+            errors = state.get("errors", [])
+            has_routing_error = any(e.node_name == "router" for e in errors)
+            if has_routing_error:
+                return ValidationResult(
+                    passed=True,
+                    message="Router exit: route_decision not set but routing error recorded",
+                )
+            return ValidationResult(
+                passed=False,
+                message="Router exit: route_decision is not set",
+                recoverable=not self.strict,
+            )
+        return ValidationResult(passed=True, message="Router exit: valid")
+
+    def validate_docs_agent_exit(self, state: "GraphState") -> ValidationResult:
+        """Validate state after docs agent execution.
+
+        Checks that evidence was added if the node executed successfully.
+
+        Args:
+            state: Current graph state.
+
+        Returns:
+            ValidationResult indicating pass/fail.
+        """
+        node_status = state.get("node_status", {})
+        docs_status = node_status.get("docs_agent")
+
+        # Skip validation if node was skipped or failed
+        if docs_status in (ExecutionStatus.SKIPPED.value, ExecutionStatus.FAILED.value):
+            return ValidationResult(
+                passed=True,
+                message=f"Docs agent exit: skipped validation (status={docs_status})",
+            )
+
+        # If successful, evidence should have been added
+        if docs_status == ExecutionStatus.SUCCESS.value:
+            evidence_list = state.get("evidence", [])
+            has_docs_evidence = any(e.source == "docs" for e in evidence_list)
+            if not has_docs_evidence:
+                return ValidationResult(
+                    passed=False,
+                    message="Docs agent exit: node succeeded but no docs evidence added",
+                    recoverable=not self.strict,
+                )
+
+        return ValidationResult(passed=True, message="Docs agent exit: valid")
+
+    def validate_sql_agent_exit(self, state: "GraphState") -> ValidationResult:
+        """Validate state after SQL agent execution.
+
+        Checks that evidence was added if the node executed successfully.
+
+        Args:
+            state: Current graph state.
+
+        Returns:
+            ValidationResult indicating pass/fail.
+        """
+        node_status = state.get("node_status", {})
+        sql_status = node_status.get("sql_agent")
+
+        # Skip validation if node was skipped or failed
+        if sql_status in (ExecutionStatus.SKIPPED.value, ExecutionStatus.FAILED.value):
+            return ValidationResult(
+                passed=True,
+                message=f"SQL agent exit: skipped validation (status={sql_status})",
+            )
+
+        # If successful, evidence should have been added
+        if sql_status == ExecutionStatus.SUCCESS.value:
+            evidence_list = state.get("evidence", [])
+            has_sql_evidence = any(e.source == "sql" for e in evidence_list)
+            if not has_sql_evidence:
+                return ValidationResult(
+                    passed=False,
+                    message="SQL agent exit: node succeeded but no sql evidence added",
+                    recoverable=not self.strict,
+                )
+
+        return ValidationResult(passed=True, message="SQL agent exit: valid")
+
+    def validate_synthesizer_exit(self, state: "GraphState") -> ValidationResult:
+        """Validate state after synthesizer execution.
+
+        Checks that final_answer is non-empty.
+
+        Args:
+            state: Current graph state.
+
+        Returns:
+            ValidationResult indicating pass/fail.
+        """
+        final_answer = state.get("final_answer", "")
+        if not final_answer or not final_answer.strip():
+            return ValidationResult(
+                passed=False,
+                message="Synthesizer exit: final_answer is empty",
+                recoverable=not self.strict,
+            )
+        return ValidationResult(passed=True, message="Synthesizer exit: valid")
+
+    def validate_entry(self, node_name: str, state: "GraphState") -> ValidationResult:
+        """Validate state at node entry.
+
+        Dispatches to the appropriate entry validation method.
+
+        Args:
+            node_name: Name of the node being entered.
+            state: Current graph state.
+
+        Returns:
+            ValidationResult indicating pass/fail.
+        """
+        validators: Dict[str, Callable[["GraphState"], ValidationResult]] = {
+            "router": self.validate_router_entry,
+        }
+        validator = validators.get(node_name)
+        if validator:
+            return validator(state)
+        return ValidationResult(passed=True, message=f"{node_name} entry: no validation")
+
+    def validate_exit(self, node_name: str, state: "GraphState") -> ValidationResult:
+        """Validate state at node exit.
+
+        Dispatches to the appropriate exit validation method.
+
+        Args:
+            node_name: Name of the node that just executed.
+            state: Current graph state.
+
+        Returns:
+            ValidationResult indicating pass/fail.
+        """
+        validators: Dict[str, Callable[["GraphState"], ValidationResult]] = {
+            "router": self.validate_router_exit,
+            "docs_agent": self.validate_docs_agent_exit,
+            "sql_agent": self.validate_sql_agent_exit,
+            "synthesizer": self.validate_synthesizer_exit,
+        }
+        validator = validators.get(node_name)
+        if validator:
+            return validator(state)
+        return ValidationResult(passed=True, message=f"{node_name} exit: no validation")
 
 
 def create_initial_state(
