@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 from chromadb.api.types import Documents, Embeddings, IDs, Metadatas
 
+from .bm25_store import BM25Config, BM25IndexEntry, BM25Store
 from .chroma_store import get_collection
 from .dataset import iter_chunk_records, load_manifest
 from .embeddings import EmbeddingConfig, EmbeddingError, EmbeddingService
@@ -23,6 +24,8 @@ class IndexingConfig:
     embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
     batch_size: int = 32
     doc_filter: Optional[Sequence[str]] = None
+    enable_bm25: bool = True
+    bm25_dir: Optional[Path] = None  # Defaults to chroma_dir if None
 
 
 # Required metadata fields for Chroma chunks (Issue #14)
@@ -53,6 +56,7 @@ class IndexingResult:
     indexed_chunks: int
     skipped_docs: int
     failed_chunks: int = 0
+    bm25_indexed_chunks: int = 0
     verification: MetadataVerificationResult = None
 
 
@@ -74,6 +78,16 @@ class ChromaIndexingPipeline:
         self.manifest_path = config.processed_dir / "manifest.json"
         self.chunks_dir = config.processed_dir / "chunks"
 
+        # Initialize BM25 store if enabled
+        self.bm25_store: Optional[BM25Store] = None
+        if config.enable_bm25:
+            bm25_dir = config.bm25_dir or config.chroma_dir
+            bm25_config = BM25Config(
+                index_dir=bm25_dir,
+                index_name=config.collection_name,
+            )
+            self.bm25_store = BM25Store(bm25_config)
+
     def run(self) -> IndexingResult:
         manifest = load_manifest(self.manifest_path)
         available_doc_ids = set(manifest.keys())
@@ -90,6 +104,7 @@ class ChromaIndexingPipeline:
         indexed_chunks = 0
         skipped_docs = 0
         failed_chunks = 0
+        bm25_indexed_chunks = 0
 
         for doc_id in doc_ids:
             records = list(iter_chunk_records(manifest, self.chunks_dir, [doc_id]))
@@ -99,11 +114,29 @@ class ChromaIndexingPipeline:
                 continue
 
             logger.info("Re-indexing %s (%d chunks).", doc_id, len(records))
+
+            # Delete existing chunks from Chroma
             self.collection.delete(where={"doc_id": doc_id})
+
+            # Delete existing chunks from BM25
+            if self.bm25_store:
+                removed = self.bm25_store.remove_by_doc_id(doc_id)
+                if removed > 0:
+                    logger.debug("Removed %d chunks from BM25 for %s.", removed, doc_id)
+
+            # Upsert to Chroma
             success_count, fail_count = self._upsert_records(records)
+
+            # Upsert to BM25
+            bm25_added = 0
+            if self.bm25_store:
+                bm25_added = self._upsert_bm25_records(records)
+                bm25_indexed_chunks += bm25_added
+
             indexed_docs += 1
             indexed_chunks += success_count
             failed_chunks += fail_count
+
             if fail_count > 0:
                 logger.warning(
                     "Indexed %s: %d chunks succeeded, %d failed (collection=%s).",
@@ -113,18 +146,26 @@ class ChromaIndexingPipeline:
                     self.config.collection_name,
                 )
             else:
+                bm25_msg = f", BM25: {bm25_added}" if self.bm25_store else ""
                 logger.info(
-                    "Indexed %s: %d chunks (collection=%s).",
+                    "Indexed %s: %d chunks (collection=%s%s).",
                     doc_id,
                     success_count,
                     self.config.collection_name,
+                    bm25_msg,
                 )
+
+        # Save BM25 index after all documents are processed
+        if self.bm25_store:
+            self.bm25_store.save()
+            logger.info("BM25 index saved: %d total chunks.", self.bm25_store.count())
 
         return IndexingResult(
             indexed_docs=indexed_docs,
             indexed_chunks=indexed_chunks,
             skipped_docs=skipped_docs,
             failed_chunks=failed_chunks,
+            bm25_indexed_chunks=bm25_indexed_chunks,
         )
 
     def _upsert_records(self, records) -> Tuple[int, int]:
@@ -174,6 +215,30 @@ class ChromaIndexingPipeline:
                 )
 
         return success_count, fail_count
+
+    def _upsert_bm25_records(self, records) -> int:
+        """Upsert records to BM25 index.
+
+        Args:
+            records: List of ChunkRecord objects.
+
+        Returns:
+            Number of chunks added to BM25.
+        """
+        if not self.bm25_store:
+            return 0
+
+        entries = [
+            BM25IndexEntry(
+                chunk_id=record.chunk_id,
+                doc_id=record.doc_id,
+                text=record.text,
+                metadata=record.metadata,
+            )
+            for record in records
+        ]
+
+        return self.bm25_store.add_documents(entries)
 
     def verify_metadata(self, sample_size: int = 100) -> MetadataVerificationResult:
         """Verify metadata integrity of indexed chunks.

@@ -100,10 +100,18 @@ async def query_rag(request: QueryRequest) -> QueryResponse:
                 detail=f"Failed to fetch agent: {e}",
             ) from e
 
+    # Validate search_mode
+    search_mode = request.search_mode
+    if search_mode not in ("vector", "lexical", "hybrid"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid search_mode: {search_mode}. Must be 'vector', 'lexical', or 'hybrid'.",
+        )
+
     try:
         # Measure retrieval time separately
         retrieval_start = time.perf_counter()
-        retrieval_result = rag_chain.retrieve(request.question, k=request.k)
+        retrieval_result = rag_chain.retrieve(request.question, k=request.k, mode=search_mode)
         retrieval_time_ms = (time.perf_counter() - retrieval_start) * 1000
 
         # Build context and generate (LLM call only)
@@ -152,6 +160,7 @@ async def query_rag(request: QueryRequest) -> QueryResponse:
             retrieval_time_ms=round(retrieval_time_ms, 2),
             generation_time_ms=round(generation_time_ms, 2),
             agent_id=agent_id_used,
+            search_mode=search_mode,
         )
 
         return QueryResponse(

@@ -17,6 +17,10 @@ class QueryRequest(BaseModel):
         default=None,
         description="Optional agent ID for custom system prompt and parameters",
     )
+    search_mode: str = Field(
+        default="vector",
+        description="Search mode: 'vector' (semantic), 'lexical' (BM25), or 'hybrid' (RRF fusion)",
+    )
 
 
 class SourceInfo(BaseModel):
@@ -36,6 +40,9 @@ class QueryMetadata(BaseModel):
     generation_time_ms: float = Field(..., description="Time spent on generation in milliseconds")
     agent_id: Optional[str] = Field(
         default=None, description="Agent ID used for this query (if any)"
+    )
+    search_mode: str = Field(
+        default="vector", description="Search mode used: 'vector', 'lexical', or 'hybrid'"
     )
 
 
@@ -80,6 +87,9 @@ class HealthResponse(BaseModel):
     status: str = Field(..., description="Overall health status")
     vectorstore: dict = Field(..., description="Vectorstore health details")
     llm_provider: dict = Field(..., description="LLM provider health details")
+    bm25_index: Optional[dict] = Field(
+        default=None, description="BM25 lexical index health details (if enabled)"
+    )
 
 
 class ErrorResponse(BaseModel):

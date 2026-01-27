@@ -10,6 +10,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from api.schemas import DocumentInfo, DocumentsResponse, HealthResponse
+from indexing.bm25_store import BM25Config, BM25Store
 from indexing.chroma_store import health_check
 from ingestion.storage import StorageManager
 
@@ -109,6 +110,25 @@ async def health_check_endpoint() -> HealthResponse:
         logger.warning("LLM health check failed: %s", e)
         llm_status = {"healthy": False, "message": str(e)}
 
+    # Check BM25 index health
+    bm25_status = None
+    try:
+        bm25_config = BM25Config(
+            index_dir=VECTORSTORE_DIR,
+            index_name=COLLECTION_NAME,
+        )
+        bm25_store = BM25Store(bm25_config)
+        bm25_result = bm25_store.health_check()
+        bm25_status = {
+            "healthy": bm25_result.healthy,
+            "message": bm25_result.message,
+            "document_count": bm25_result.document_count,
+            "index_name": bm25_result.index_name,
+        }
+    except Exception as e:
+        logger.warning("BM25 health check failed: %s", e)
+        bm25_status = {"healthy": False, "message": str(e)}
+
     # Overall status
     overall_status = "healthy" if vs_result.healthy else "degraded"
 
@@ -116,4 +136,5 @@ async def health_check_endpoint() -> HealthResponse:
         status=overall_status,
         vectorstore=vectorstore_status,
         llm_provider=llm_status,
+        bm25_index=bm25_status,
     )
