@@ -235,3 +235,90 @@ class SQLQueryResponse(BaseModel):
         default=None, description="Generated SQL query (if show_sql=true)"
     )
     metadata: SQLQueryMetadata = Field(..., description="Query execution metadata")
+
+
+# ============================================================================
+# Unified Query Schemas (Router + ACL)
+# ============================================================================
+
+
+class SecurityContextRequest(BaseModel):
+    """Security context for a request."""
+
+    user_id: str = Field(..., description="Unique user identifier")
+    roles: list[str] = Field(default_factory=list, description="User's assigned roles")
+
+
+class UnifiedQueryRequest(BaseModel):
+    """Request model for unified query endpoint."""
+
+    question: str = Field(..., description="The question to ask")
+    security_context: Optional[SecurityContextRequest] = Field(
+        default=None, description="Security context for ACL filtering"
+    )
+    k: int = Field(default=5, ge=1, le=20, description="Number of chunks to retrieve")
+    search_mode: str = Field(
+        default="hybrid",
+        description="Search mode for document queries: 'vector', 'lexical', or 'hybrid'",
+    )
+    force_route: Optional[str] = Field(
+        default=None,
+        description="Force routing to specific type: 'documents', 'structured', or 'hybrid'",
+    )
+    rerank: Optional[bool] = Field(
+        default=None,
+        description="Enable cross-encoder reranking. None uses server config default.",
+    )
+
+
+class RoutingMetadata(BaseModel):
+    """Metadata about query routing."""
+
+    query_type: str = Field(..., description="Classified query type")
+    confidence: float = Field(..., description="Classification confidence (0.0-1.0)")
+    reasoning: str = Field(..., description="Explanation for classification")
+    routing_time_ms: float = Field(..., description="Time spent on routing in milliseconds")
+    forced: bool = Field(default=False, description="Whether routing was forced")
+
+
+class UnifiedQueryMetadata(BaseModel):
+    """Combined metadata for unified query response."""
+
+    routing: RoutingMetadata = Field(..., description="Routing decision metadata")
+    retrieval_time_ms: float = Field(
+        default=0.0, description="Time spent on retrieval in milliseconds"
+    )
+    generation_time_ms: float = Field(
+        default=0.0, description="Time spent on generation in milliseconds"
+    )
+    search_mode: Optional[str] = Field(
+        default=None, description="Search mode used (for document queries)"
+    )
+    reranking_applied: bool = Field(
+        default=False, description="Whether reranking was applied"
+    )
+    tables_used: list[str] = Field(
+        default_factory=list, description="Tables accessed (for SQL queries)"
+    )
+
+
+class SQLResultData(BaseModel):
+    """SQL query result data."""
+
+    data: list[dict] = Field(default_factory=list, description="Query result rows")
+    columns: list[str] = Field(default_factory=list, description="Column names")
+    row_count: int = Field(default=0, description="Number of rows returned")
+    generated_sql: Optional[str] = Field(default=None, description="Generated SQL query")
+
+
+class UnifiedQueryResponse(BaseModel):
+    """Response model for unified query endpoint."""
+
+    answer: str = Field(..., description="Generated answer")
+    sources: list[SourceInfo] = Field(
+        default_factory=list, description="Retrieved document sources (if applicable)"
+    )
+    sql_result: Optional[SQLResultData] = Field(
+        default=None, description="SQL query results (if applicable)"
+    )
+    metadata: UnifiedQueryMetadata = Field(..., description="Query execution metadata")

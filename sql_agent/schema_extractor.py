@@ -62,16 +62,21 @@ class SchemaExtractor:
         self,
         config: Optional[SQLAgentConfig] = None,
         sql_store: Optional[SQLStore] = None,
+        excluded_tables: Optional[List[str]] = None,
     ) -> None:
         """Initialize the schema extractor.
 
         Args:
             config: SQLAgentConfig with database settings.
             sql_store: Optional pre-configured SQLStore instance.
+            excluded_tables: Optional list of tables to exclude.
+                Overrides config.excluded_tables if provided.
         """
         self.config = config or SQLAgentConfig()
         self._sql_store = sql_store
         self._schema_cache: Optional[SchemaInfo] = None
+        # Allow dynamic exclusion list (for ACL filtering)
+        self._excluded_tables = excluded_tables
 
     def _get_sql_store(self) -> SQLStore:
         """Get or create SQLStore instance."""
@@ -100,8 +105,13 @@ class SchemaExtractor:
         # Get all user tables
         all_tables = sql_store.list_tables()
 
-        # Filter out excluded tables
-        excluded = set(t.lower() for t in self.config.excluded_tables)
+        # Filter out excluded tables (use dynamic list if provided)
+        excluded_list = (
+            self._excluded_tables
+            if self._excluded_tables is not None
+            else self.config.excluded_tables
+        )
+        excluded = set(t.lower() for t in excluded_list)
         tables = [t for t in all_tables if t.lower() not in excluded]
 
         table_infos = []

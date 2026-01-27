@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from generation.base import BaseLLMClient
 from storage.sql_store import SQLStore, SQLStoreConfig
@@ -20,6 +20,9 @@ from .errors import QueryExecutionError, QueryGenerationError, QueryValidationEr
 from .query_validator import QueryValidator
 from .schema_extractor import SchemaExtractor
 from .sql_generator import SQLGenerator
+
+if TYPE_CHECKING:
+    from security import SecurityContext, TableACL
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +114,23 @@ class SQLChain:
             self._sql_store = SQLStore(store_config)
         return self._sql_store
 
-    def _get_schema_extractor(self) -> SchemaExtractor:
-        """Get or initialize SchemaExtractor."""
+    def _get_schema_extractor(
+        self, excluded_tables: Optional[List[str]] = None
+    ) -> SchemaExtractor:
+        """Get or initialize SchemaExtractor.
+
+        Args:
+            excluded_tables: Optional list of tables to exclude. If provided,
+                creates a fresh extractor with these exclusions.
+        """
+        if excluded_tables is not None:
+            # Create a fresh extractor with dynamic exclusions
+            return SchemaExtractor(
+                config=self.config,
+                sql_store=self._get_sql_store(),
+                excluded_tables=excluded_tables,
+            )
+
         if self._schema_extractor is None:
             self._schema_extractor = SchemaExtractor(
                 config=self.config,
@@ -126,8 +144,27 @@ class SQLChain:
             self._validator = QueryValidator(self.config)
         return self._validator
 
-    def _get_generator(self) -> SQLGenerator:
-        """Get or initialize SQLGenerator."""
+    def _get_generator(
+        self, excluded_tables: Optional[List[str]] = None
+    ) -> SQLGenerator:
+        """Get or initialize SQLGenerator.
+
+        Args:
+            excluded_tables: Optional list of tables to exclude. If provided,
+                creates a fresh generator with these exclusions instead of
+                using the cached one.
+        """
+        if excluded_tables is not None:
+            # Create a fresh generator with dynamic exclusions
+            schema_extractor = self._get_schema_extractor(
+                excluded_tables=excluded_tables
+            )
+            return SQLGenerator(
+                llm_client=self.llm_client,
+                config=self.config,
+                schema_extractor=schema_extractor,
+            )
+
         if self._generator is None:
             self._generator = SQLGenerator(
                 llm_client=self.llm_client,
@@ -141,6 +178,8 @@ class SQLChain:
         question: str,
         max_rows: Optional[int] = None,
         summarize: bool = True,
+        security_context: Optional["SecurityContext"] = None,
+        table_acl: Optional["TableACL"] = None,
     ) -> SQLQueryResult:
         """Execute a natural language query against the database.
 
@@ -148,6 +187,8 @@ class SQLChain:
             question: Natural language question.
             max_rows: Maximum rows to return (overrides config).
             summarize: Whether to generate natural language answer.
+            security_context: Optional security context for ACL filtering.
+            table_acl: Optional table ACL for access control.
 
         Returns:
             SQLQueryResult with data and optional answer.
@@ -159,9 +200,19 @@ class SQLChain:
         """
         effective_max_rows = max_rows or self.config.max_result_rows
 
-        # Step 1: Generate SQL
+        # Compute dynamic excluded tables based on ACL
+        dynamic_excluded: Set[str] = set(self.config.excluded_tables)
+        if table_acl is not None and security_context is not None:
+            # Get all available tables
+            sql_store = self._get_sql_store()
+            all_tables = sql_store.list_tables()
+            # Get tables blocked by ACL
+            blocked_tables = table_acl.get_excluded_tables(all_tables, security_context)
+            dynamic_excluded.update(blocked_tables)
+
+        # Step 1: Generate SQL (with dynamic excluded tables)
         generation_start = time.perf_counter()
-        generator = self._get_generator()
+        generator = self._get_generator(excluded_tables=list(dynamic_excluded))
         sql = generator.generate(question, max_rows=effective_max_rows)
         generation_time_ms = (time.perf_counter() - generation_start) * 1000
 
@@ -171,6 +222,16 @@ class SQLChain:
 
         # Extract tables used
         tables_used = validator.extract_tables(sql)
+
+        # Step 2.5: Validate ACL on extracted tables
+        if table_acl is not None and security_context is not None:
+            is_valid, unauthorized = table_acl.validate_query_tables(
+                tables_used, security_context
+            )
+            if not is_valid:
+                raise QueryValidationError(
+                    f"Access denied to tables: {unauthorized}"
+                )
 
         # Step 3: Execute SQL
         execution_start = time.perf_counter()

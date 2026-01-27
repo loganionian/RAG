@@ -13,9 +13,17 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routes import agents_router, documents_router, ingest_router, query_router, sql_query_router
+from api.routes import (
+    agents_router,
+    documents_router,
+    ingest_router,
+    query_router,
+    sql_query_router,
+    unified_query_router,
+)
 from api.routes.query import set_rag_chain
 from api.routes.sql_query import set_sql_chain
+from api.routes.unified_query import set_unified_components
 from api.schemas import ErrorResponse
 
 # Load environment variables
@@ -37,6 +45,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown events."""
     # Startup
     logger.info("Starting RAG API server...")
+
+    rag_chain = None
+    sql_chain = None
 
     # Initialize RAG chain if vectorstore exists
     if VECTORSTORE_DIR.exists():
@@ -73,6 +84,44 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.warning("Vectorstore directory does not exist: %s", VECTORSTORE_DIR)
         logger.info("Run ingestion and indexing pipelines first")
 
+    # Initialize unified query components
+    try:
+        from router import QuestionClassifier, RouterConfig
+        from security import ACLConfig, ACLFilter, AuditLogger, TableACL, TableACLConfig
+
+        # Create classifier with known tables from SQL chain
+        router_config = RouterConfig()
+        if sql_chain is not None:
+            try:
+                known_tables = sql_chain.get_available_tables()
+                router_config.known_tables = known_tables
+            except Exception as e:
+                logger.warning("Could not get known tables for classifier: %s", e)
+
+        classifier = QuestionClassifier(router_config)
+
+        # Create security components (ACL disabled by default)
+        acl_filter = ACLFilter(ACLConfig())
+        table_acl = TableACL(TableACLConfig())
+
+        # Create audit logger
+        audit_logger = AuditLogger(enabled=True)
+
+        # Set unified components
+        set_unified_components(
+            rag_chain=rag_chain,
+            sql_chain=sql_chain,
+            classifier=classifier,
+            acl_filter=acl_filter,
+            table_acl=table_acl,
+            audit_logger=audit_logger,
+        )
+        logger.info("Unified query components initialized successfully")
+
+    except Exception as e:
+        logger.warning("Failed to initialize unified query components: %s", e)
+        logger.info("Unified query endpoint may have limited functionality")
+
     yield
 
     # Shutdown
@@ -102,6 +151,7 @@ app.include_router(documents_router)
 app.include_router(query_router)
 app.include_router(ingest_router)
 app.include_router(sql_query_router)
+app.include_router(unified_query_router)
 
 
 @app.exception_handler(Exception)

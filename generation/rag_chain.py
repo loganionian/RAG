@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
 
 import chromadb
 from chromadb.utils import embedding_functions
@@ -15,6 +15,9 @@ from indexing.bm25_store import BM25Config, BM25Store
 from indexing.embeddings import get_model_path
 from retrieval.score_normalizer import NormalizationConfig, ScoreNormalizer
 from retrieval.reranker import CrossEncoderReranker, RerankerConfig, RerankResult
+
+if TYPE_CHECKING:
+    from security import ACLFilter, SecurityContext
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +153,8 @@ class RAGChain:
         k: Optional[int] = None,
         mode: SearchMode = "vector",
         rerank: Optional[bool] = None,
+        security_context: Optional["SecurityContext"] = None,
+        acl_filter: Optional["ACLFilter"] = None,
     ) -> RetrievalResult:
         """Retrieve relevant chunks for a query.
 
@@ -158,6 +163,8 @@ class RAGChain:
             k: Number of results to retrieve (overrides config).
             mode: Search mode - 'vector', 'lexical', or 'hybrid'.
             rerank: Whether to apply cross-encoder reranking. None uses config default.
+            security_context: Optional security context for ACL filtering.
+            acl_filter: Optional ACL filter instance for access control.
 
         Returns:
             Retrieved chunks with metadata.
@@ -167,15 +174,36 @@ class RAGChain:
         # Determine whether to rerank
         should_rerank = rerank if rerank is not None else self.config.enable_reranking
 
+        # Build ACL where clause for vector search
+        acl_where = None
+        if acl_filter is not None and security_context is not None:
+            acl_where = acl_filter.build_chroma_where(security_context)
+
         if mode == "vector":
-            result = self._retrieve_vector(query, n_results)
+            result = self._retrieve_vector(query, n_results, where=acl_where)
         elif mode == "lexical":
             result = self._retrieve_lexical(query, n_results)
+            # Apply post-filtering for BM25 (doesn't support native filtering)
+            if acl_filter is not None and security_context is not None:
+                chunks, metadatas, ids, distances = acl_filter.filter_bm25_results(
+                    result.chunks, result.metadatas, result.ids, result.distances,
+                    security_context
+                )
+                result = RetrievalResult(
+                    chunks=chunks,
+                    metadatas=metadatas,
+                    distances=distances,
+                    ids=ids,
+                )
         elif mode == "hybrid":
-            result = self._retrieve_hybrid(query, n_results, rerank=should_rerank)
+            result = self._retrieve_hybrid(
+                query, n_results, rerank=should_rerank,
+                acl_where=acl_where, acl_filter=acl_filter,
+                security_context=security_context
+            )
         else:
             logger.warning("Unknown search mode '%s', falling back to vector.", mode)
-            result = self._retrieve_vector(query, n_results)
+            result = self._retrieve_vector(query, n_results, where=acl_where)
 
         # Apply reranking if enabled (for non-hybrid modes - hybrid handles reranking internally)
         if should_rerank and mode != "hybrid" and result.chunks:
@@ -183,22 +211,29 @@ class RAGChain:
 
         return result
 
-    def _retrieve_vector(self, query: str, k: int) -> RetrievalResult:
+    def _retrieve_vector(
+        self, query: str, k: int, where: Optional[Dict[str, Any]] = None
+    ) -> RetrievalResult:
         """Retrieve using vector (semantic) search.
 
         Args:
             query: User query.
             k: Number of results.
+            where: Optional Chroma where clause for filtering.
 
         Returns:
             Retrieved chunks with metadata.
         """
         collection = self._get_collection()
 
-        result = collection.query(
-            query_texts=[query],
-            n_results=k,
-        )
+        query_kwargs = {
+            "query_texts": [query],
+            "n_results": k,
+        }
+        if where is not None:
+            query_kwargs["where"] = where
+
+        result = collection.query(**query_kwargs)
 
         documents = result.get("documents", [[]])[0]
         metadatas = result.get("metadatas", [[]])[0]
@@ -245,7 +280,13 @@ class RAGChain:
         )
 
     def _retrieve_hybrid(
-        self, query: str, k: int, rerank: bool = False
+        self,
+        query: str,
+        k: int,
+        rerank: bool = False,
+        acl_where: Optional[Dict[str, Any]] = None,
+        acl_filter: Optional["ACLFilter"] = None,
+        security_context: Optional["SecurityContext"] = None,
     ) -> RetrievalResult:
         """Retrieve using hybrid search with RRF fusion and optional reranking.
 
@@ -256,6 +297,9 @@ class RAGChain:
             query: User query.
             k: Number of results to return.
             rerank: Whether to apply cross-encoder reranking.
+            acl_where: Optional Chroma where clause for ACL filtering.
+            acl_filter: Optional ACL filter for post-filtering BM25 results.
+            security_context: Optional security context for ACL filtering.
 
         Returns:
             Fused results from both search methods.
@@ -265,8 +309,22 @@ class RAGChain:
         multiplier = self.config.reranker_top_k_multiplier if rerank else 2
         fetch_k = k * multiplier
 
-        vector_result = self._retrieve_vector(query, fetch_k)
+        vector_result = self._retrieve_vector(query, fetch_k, where=acl_where)
         lexical_result = self._retrieve_lexical(query, fetch_k)
+
+        # Apply ACL post-filtering for lexical results
+        if acl_filter is not None and security_context is not None:
+            chunks, metadatas, ids, distances = acl_filter.filter_bm25_results(
+                lexical_result.chunks, lexical_result.metadatas,
+                lexical_result.ids, lexical_result.distances,
+                security_context
+            )
+            lexical_result = RetrievalResult(
+                chunks=chunks,
+                metadatas=metadatas,
+                distances=distances,
+                ids=ids,
+            )
 
         if not lexical_result.ids:
             # Fall back to vector-only if lexical search unavailable
