@@ -9,6 +9,9 @@ RAG MVP - A Python-based Retrieval Augmented Generation system for semantic docu
 ## Commands
 
 ### Setup
+
+**Requires Python 3.12+**
+
 ```bash
 python -m venv .venv
 .venv\Scripts\activate  # Windows
@@ -52,7 +55,7 @@ python -m scripts.rag_chat -q "Summarize the report" --json
 
 ### REST API Server
 ```bash
-# Start the API server (default: http://localhost:8000)
+# Start the API server (default: http://localhost:8080)
 python -m uvicorn api.main:app --reload
 
 # Start with custom host/port
@@ -576,7 +579,7 @@ The REST API provides a UI-agnostic interface to the RAG system. It is designed 
 python -m uvicorn api.main:app --reload
 
 # Production mode
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
+python -m uvicorn api.main:app --host 0.0.0.0 --port 8080
 ```
 
 **Environment Variables:**
@@ -603,7 +606,7 @@ LLM_PROVIDER=openai  # or: custom, anthropic, ollama
 
 **Query Endpoint:**
 ```bash
-curl -X POST http://localhost:8000/api/query \
+curl -X POST http://localhost:8080/api/query \
   -H "Content-Type: application/json" \
   -d '{"question": "What skills are in demand?", "k": 5}'
 ```
@@ -630,7 +633,7 @@ Response:
 
 **Ingest Endpoint:**
 ```bash
-curl -X POST http://localhost:8000/api/ingest \
+curl -X POST http://localhost:8080/api/ingest \
   -F "file=@document.pdf"
 ```
 
@@ -647,7 +650,7 @@ Response:
 
 **Health Endpoint:**
 ```bash
-curl http://localhost:8000/api/health
+curl http://localhost:8080/api/health
 ```
 
 Response:
@@ -670,7 +673,7 @@ Response:
 
 **Documents Endpoint:**
 ```bash
-curl http://localhost:8000/api/documents
+curl http://localhost:8080/api/documents
 ```
 
 Response:
