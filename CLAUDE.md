@@ -107,6 +107,10 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 - `dataset_summarizer.py`: `DatasetSummarizer` generates LLM summaries for tabular datasets
 - `cost_tracker.py`: `CostTracker` for token usage tracking and budget controls
 
+**retrieval/** - Score normalization and reranking
+- `score_normalizer.py`: `ScoreNormalizer` with min-max, z-score, and rank normalization methods
+- `reranker.py`: `CrossEncoderReranker` for cross-encoder reranking with lazy model loading
+
 **api/** - REST API (UI-agnostic)
 - `main.py`: FastAPI application with CORS, lifespan events
 - `schemas.py`: Pydantic request/response models
@@ -138,6 +142,9 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 - BM25 k1: 1.5 (term frequency saturation)
 - BM25 b: 0.75 (length normalization)
 - Hybrid lexical weight: 0.3 (30% lexical, 70% vector in RRF fusion)
+- Reranking: Disabled by default
+- Reranker model: `cross-encoder/ms-marco-MiniLM-L-6-v2`
+- Reranker top-k multiplier: 3 (fetch k*3 candidates before reranking)
 
 ### BM25 Lexical Search
 
@@ -223,6 +230,96 @@ response = chain.query("question", search_mode="hybrid")
 **BM25 Parameters:**
 - `k1` (default: 1.5): Controls term frequency saturation. Higher values give more weight to term frequency.
 - `b` (default: 0.75): Controls length normalization. 0 = no normalization, 1 = full normalization.
+
+### Cross-Encoder Reranking
+
+The RAG system supports cross-encoder reranking to improve retrieval relevance. After initial retrieval (vector, lexical, or hybrid), a cross-encoder model scores query-document pairs for better relevance ranking.
+
+**Architecture:**
+```
+Query → Initial Retrieval (k*3 candidates)
+              │
+              ▼
+      [ScoreNormalizer]
+        normalize scores
+              │
+              ▼
+      [RRF Fusion] (hybrid only)
+              │
+              ▼
+      [CrossEncoderReranker]
+        rerank top candidates
+              │
+              ▼
+        Top-k Results
+```
+
+**Configuration:**
+```python
+from generation.rag_chain import RAGChain, RAGConfig
+
+config = RAGConfig(
+    vectorstore_dir=Path("data/vectorstore"),
+    enable_lexical=True,
+    # Reranking settings
+    enable_reranking=True,                    # Enable by default
+    reranker_model="cross-encoder/ms-marco-MiniLM-L-6-v2",  # Default model
+    reranker_top_k_multiplier=3,              # Fetch k*3 candidates before reranking
+    normalize_scores=True,                    # Normalize scores before fusion
+)
+
+chain = RAGChain(llm_client, config)
+
+# Reranking is applied automatically when enabled
+result = chain.retrieve("query", k=5, mode="hybrid")
+
+# Override per-query
+result = chain.retrieve("query", k=5, mode="hybrid", rerank=True)
+result = chain.retrieve("query", k=5, mode="hybrid", rerank=False)
+```
+
+**API Usage:**
+```bash
+# Enable reranking for a single query
+curl -X POST http://localhost:8080/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "skills in demand", "k": 5, "search_mode": "hybrid", "rerank": true}'
+
+# Response includes reranking_applied in metadata
+{
+  "answer": "...",
+  "sources": [...],
+  "metadata": {
+    "retrieval_time_ms": 150.5,
+    "generation_time_ms": 1200.3,
+    "search_mode": "hybrid",
+    "reranking_applied": true
+  }
+}
+```
+
+**When to Use Reranking:**
+- **Use reranking** when precision is critical (e.g., legal, medical, compliance queries)
+- **Skip reranking** for latency-sensitive applications or simple queries
+- **Hybrid + reranking** provides the best relevance but highest latency
+
+**Default Reranker Model:** `cross-encoder/ms-marco-MiniLM-L-6-v2`
+- Trained on MS MARCO passage ranking dataset
+- Good balance between speed and accuracy
+- ~22M parameters
+
+**Offline Model Download:**
+```bash
+# Download reranker model for offline use
+python -m scripts.download_reranker_model --output-dir models
+
+# The model will be saved to: models/cross-encoder_ms-marco-MiniLM-L-6-v2/
+```
+
+**Manual override:** Set environment variable:
+```bash
+set RERANKER_MODEL_PATH=models/cross-encoder_ms-marco-MiniLM-L-6-v2
+```
 
 ### Local Embedding Model (Offline/Corporate Environments)
 

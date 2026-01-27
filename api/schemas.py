@@ -21,6 +21,10 @@ class QueryRequest(BaseModel):
         default="vector",
         description="Search mode: 'vector' (semantic), 'lexical' (BM25), or 'hybrid' (RRF fusion)",
     )
+    rerank: Optional[bool] = Field(
+        default=None,
+        description="Enable cross-encoder reranking. None uses server config default.",
+    )
 
 
 class SourceInfo(BaseModel):
@@ -43,6 +47,9 @@ class QueryMetadata(BaseModel):
     )
     search_mode: str = Field(
         default="vector", description="Search mode used: 'vector', 'lexical', or 'hybrid'"
+    )
+    reranking_applied: bool = Field(
+        default=False, description="Whether cross-encoder reranking was applied"
     )
 
 

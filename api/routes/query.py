@@ -108,10 +108,15 @@ async def query_rag(request: QueryRequest) -> QueryResponse:
             detail=f"Invalid search_mode: {search_mode}. Must be 'vector', 'lexical', or 'hybrid'.",
         )
 
+    # Determine whether reranking should be applied
+    should_rerank = request.rerank if request.rerank is not None else rag_chain.config.enable_reranking
+
     try:
         # Measure retrieval time separately
         retrieval_start = time.perf_counter()
-        retrieval_result = rag_chain.retrieve(request.question, k=request.k, mode=search_mode)
+        retrieval_result = rag_chain.retrieve(
+            request.question, k=request.k, mode=search_mode, rerank=should_rerank
+        )
         retrieval_time_ms = (time.perf_counter() - retrieval_start) * 1000
 
         # Build context and generate (LLM call only)
@@ -161,6 +166,7 @@ async def query_rag(request: QueryRequest) -> QueryResponse:
             generation_time_ms=round(generation_time_ms, 2),
             agent_id=agent_id_used,
             search_mode=search_mode,
+            reranking_applied=should_rerank,
         )
 
         return QueryResponse(

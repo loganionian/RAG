@@ -13,8 +13,12 @@ from chromadb.utils import embedding_functions
 from .base import BaseLLMClient
 from indexing.bm25_store import BM25Config, BM25Store
 from indexing.embeddings import get_model_path
+from retrieval.score_normalizer import NormalizationConfig, ScoreNormalizer
+from retrieval.reranker import CrossEncoderReranker, RerankerConfig, RerankResult
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 # Type alias for search mode
 SearchMode = Literal["vector", "lexical", "hybrid"]
@@ -67,6 +71,11 @@ class RAGConfig:
     enable_lexical: bool = False
     lexical_weight: float = 0.3  # Weight for lexical results in hybrid mode (0-1)
     bm25_dir: Optional[Path] = None  # Defaults to vectorstore_dir if None
+    # Reranking settings
+    enable_reranking: bool = False
+    reranker_model: str = DEFAULT_RERANKER_MODEL
+    reranker_top_k_multiplier: int = 3  # Fetch k * multiplier candidates before reranking
+    normalize_scores: bool = True  # Normalize scores before RRF fusion
 
 
 class RAGChain:
@@ -89,6 +98,8 @@ class RAGChain:
         self._collection = None
         self._chroma_client = None
         self._bm25_store: Optional[BM25Store] = None
+        self._reranker: Optional[CrossEncoderReranker] = None
+        self._score_normalizer: Optional[ScoreNormalizer] = None
 
     def _get_collection(self):
         """Get or initialize the Chroma collection."""
@@ -118,11 +129,27 @@ class RAGChain:
             self._bm25_store = BM25Store(bm25_config)
         return self._bm25_store
 
+    def _get_reranker(self) -> Optional[CrossEncoderReranker]:
+        """Get or initialize the cross-encoder reranker."""
+        if self._reranker is None and self.config.enable_reranking:
+            reranker_config = RerankerConfig(
+                model_name=self.config.reranker_model,
+            )
+            self._reranker = CrossEncoderReranker(reranker_config)
+        return self._reranker
+
+    def _get_score_normalizer(self) -> ScoreNormalizer:
+        """Get or initialize the score normalizer."""
+        if self._score_normalizer is None:
+            self._score_normalizer = ScoreNormalizer(NormalizationConfig())
+        return self._score_normalizer
+
     def retrieve(
         self,
         query: str,
         k: Optional[int] = None,
         mode: SearchMode = "vector",
+        rerank: Optional[bool] = None,
     ) -> RetrievalResult:
         """Retrieve relevant chunks for a query.
 
@@ -130,21 +157,31 @@ class RAGChain:
             query: User query.
             k: Number of results to retrieve (overrides config).
             mode: Search mode - 'vector', 'lexical', or 'hybrid'.
+            rerank: Whether to apply cross-encoder reranking. None uses config default.
 
         Returns:
             Retrieved chunks with metadata.
         """
         n_results = k or self.config.top_k
 
+        # Determine whether to rerank
+        should_rerank = rerank if rerank is not None else self.config.enable_reranking
+
         if mode == "vector":
-            return self._retrieve_vector(query, n_results)
+            result = self._retrieve_vector(query, n_results)
         elif mode == "lexical":
-            return self._retrieve_lexical(query, n_results)
+            result = self._retrieve_lexical(query, n_results)
         elif mode == "hybrid":
-            return self._retrieve_hybrid(query, n_results)
+            result = self._retrieve_hybrid(query, n_results, rerank=should_rerank)
         else:
             logger.warning("Unknown search mode '%s', falling back to vector.", mode)
-            return self._retrieve_vector(query, n_results)
+            result = self._retrieve_vector(query, n_results)
+
+        # Apply reranking if enabled (for non-hybrid modes - hybrid handles reranking internally)
+        if should_rerank and mode != "hybrid" and result.chunks:
+            result = self._apply_reranking(query, result, n_results)
+
+        return result
 
     def _retrieve_vector(self, query: str, k: int) -> RetrievalResult:
         """Retrieve using vector (semantic) search.
@@ -207,73 +244,175 @@ class RAGChain:
             ids=[r.chunk_id for r in results],
         )
 
-    def _retrieve_hybrid(self, query: str, k: int) -> RetrievalResult:
-        """Retrieve using hybrid search with RRF fusion.
+    def _retrieve_hybrid(
+        self, query: str, k: int, rerank: bool = False
+    ) -> RetrievalResult:
+        """Retrieve using hybrid search with RRF fusion and optional reranking.
 
         Combines vector and lexical search results using Reciprocal Rank Fusion.
+        Optionally applies cross-encoder reranking for improved relevance.
 
         Args:
             query: User query.
             k: Number of results to return.
+            rerank: Whether to apply cross-encoder reranking.
 
         Returns:
             Fused results from both search methods.
         """
-        # Get more results from each method to ensure good fusion
-        fetch_k = k * 2
+        # Determine how many candidates to fetch
+        # If reranking, fetch more to ensure we have good candidates for the reranker
+        multiplier = self.config.reranker_top_k_multiplier if rerank else 2
+        fetch_k = k * multiplier
 
         vector_result = self._retrieve_vector(query, fetch_k)
         lexical_result = self._retrieve_lexical(query, fetch_k)
 
         if not lexical_result.ids:
             # Fall back to vector-only if lexical search unavailable
-            return self._retrieve_vector(query, k)
+            result = self._retrieve_vector(query, k)
+            if rerank and result.chunks:
+                result = self._apply_reranking(query, result, k)
+            return result
+
+        # Get normalized scores if enabled
+        normalizer = self._get_score_normalizer() if self.config.normalize_scores else None
+
+        # Build chunk data and compute RRF scores
+        chunk_data: dict[str, dict] = {}
+        chunk_rrf_scores: dict[str, float] = {}
 
         # Reciprocal Rank Fusion (RRF)
-        # RRF score = sum(1 / (rrf_k + rank)) for each list
+        # RRF score = sum(weight / (rrf_k + rank)) for each list
         rrf_k = 60  # Standard RRF constant
 
-        chunk_scores: dict[str, float] = {}
-        chunk_data: dict[str, dict] = {}
-
-        # Score vector results
-        for rank, (chunk_id, chunk, metadata, distance) in enumerate(
-            zip(
-                vector_result.ids,
-                vector_result.chunks,
-                vector_result.metadatas,
-                vector_result.distances,
+        # Process vector results
+        if normalizer:
+            # Normalize vector distances to similarity scores
+            normalized_vector = normalizer.normalize_vector_distances(
+                vector_result.distances, vector_result.ids
             )
-        ):
-            rrf_score = (1.0 - self.config.lexical_weight) / (rrf_k + rank + 1)
-            chunk_scores[chunk_id] = chunk_scores.get(chunk_id, 0.0) + rrf_score
-            if chunk_id not in chunk_data:
-                chunk_data[chunk_id] = {
-                    "chunk": chunk,
-                    "metadata": metadata,
-                    "distance": distance,
-                }
-
-        # Score lexical results
-        for rank, (chunk_id, chunk, metadata, distance) in enumerate(
-            zip(
-                lexical_result.ids,
-                lexical_result.chunks,
-                lexical_result.metadatas,
-                lexical_result.distances,
+            # Sort by normalized score (descending) to get ranks
+            sorted_vector = sorted(
+                range(len(normalized_vector)),
+                key=lambda i: normalized_vector[i].normalized,
+                reverse=True,
             )
-        ):
-            rrf_score = self.config.lexical_weight / (rrf_k + rank + 1)
-            chunk_scores[chunk_id] = chunk_scores.get(chunk_id, 0.0) + rrf_score
-            if chunk_id not in chunk_data:
-                chunk_data[chunk_id] = {
-                    "chunk": chunk,
-                    "metadata": metadata,
-                    "distance": distance,
-                }
+            for rank, idx in enumerate(sorted_vector):
+                chunk_id = vector_result.ids[idx]
+                rrf_score = (1.0 - self.config.lexical_weight) / (rrf_k + rank + 1)
+                chunk_rrf_scores[chunk_id] = chunk_rrf_scores.get(chunk_id, 0.0) + rrf_score
+                if chunk_id not in chunk_data:
+                    chunk_data[chunk_id] = {
+                        "chunk": vector_result.chunks[idx],
+                        "metadata": vector_result.metadatas[idx],
+                        "distance": vector_result.distances[idx],
+                        "vector_score": normalized_vector[idx].normalized,
+                    }
+        else:
+            # Use original ranking (by distance, ascending)
+            for rank, (chunk_id, chunk, metadata, distance) in enumerate(
+                zip(
+                    vector_result.ids,
+                    vector_result.chunks,
+                    vector_result.metadatas,
+                    vector_result.distances,
+                )
+            ):
+                rrf_score = (1.0 - self.config.lexical_weight) / (rrf_k + rank + 1)
+                chunk_rrf_scores[chunk_id] = chunk_rrf_scores.get(chunk_id, 0.0) + rrf_score
+                if chunk_id not in chunk_data:
+                    chunk_data[chunk_id] = {
+                        "chunk": chunk,
+                        "metadata": metadata,
+                        "distance": distance,
+                    }
 
-        # Sort by RRF score (higher is better) and take top k
-        sorted_ids = sorted(chunk_scores.keys(), key=lambda x: chunk_scores[x], reverse=True)[:k]
+        # Process lexical results
+        if normalizer:
+            # Get original BM25 scores from the store
+            bm25_store = self._get_bm25_store()
+            bm25_results = bm25_store.search(query, k=fetch_k) if bm25_store else []
+            bm25_scores = [r.score for r in bm25_results]
+            bm25_ids = [r.chunk_id for r in bm25_results]
+
+            # Normalize BM25 scores
+            normalized_lexical = normalizer.normalize_bm25_scores(bm25_scores, bm25_ids)
+            # Sort by normalized score (descending) to get ranks
+            sorted_lexical = sorted(
+                range(len(normalized_lexical)),
+                key=lambda i: normalized_lexical[i].normalized,
+                reverse=True,
+            )
+            for rank, idx in enumerate(sorted_lexical):
+                chunk_id = lexical_result.ids[idx]
+                rrf_score = self.config.lexical_weight / (rrf_k + rank + 1)
+                chunk_rrf_scores[chunk_id] = chunk_rrf_scores.get(chunk_id, 0.0) + rrf_score
+                if chunk_id not in chunk_data:
+                    chunk_data[chunk_id] = {
+                        "chunk": lexical_result.chunks[idx],
+                        "metadata": lexical_result.metadatas[idx],
+                        "distance": lexical_result.distances[idx],
+                        "lexical_score": normalized_lexical[idx].normalized,
+                    }
+                else:
+                    chunk_data[chunk_id]["lexical_score"] = normalized_lexical[idx].normalized
+        else:
+            # Use original ranking
+            for rank, (chunk_id, chunk, metadata, distance) in enumerate(
+                zip(
+                    lexical_result.ids,
+                    lexical_result.chunks,
+                    lexical_result.metadatas,
+                    lexical_result.distances,
+                )
+            ):
+                rrf_score = self.config.lexical_weight / (rrf_k + rank + 1)
+                chunk_rrf_scores[chunk_id] = chunk_rrf_scores.get(chunk_id, 0.0) + rrf_score
+                if chunk_id not in chunk_data:
+                    chunk_data[chunk_id] = {
+                        "chunk": chunk,
+                        "metadata": metadata,
+                        "distance": distance,
+                    }
+
+        # Sort by RRF score (higher is better)
+        sorted_ids = sorted(
+            chunk_rrf_scores.keys(),
+            key=lambda x: chunk_rrf_scores[x],
+            reverse=True,
+        )
+
+        # If reranking, pass top candidates to reranker
+        if rerank:
+            reranker = self._get_reranker()
+            if reranker:
+                # Prepare candidates for reranking
+                candidates_for_rerank = k * self.config.reranker_top_k_multiplier
+                top_candidate_ids = sorted_ids[:candidates_for_rerank]
+
+                candidates = [
+                    {
+                        "chunk_id": cid,
+                        "text": chunk_data[cid]["chunk"],
+                        "metadata": chunk_data[cid]["metadata"],
+                        "score": chunk_rrf_scores[cid],
+                    }
+                    for cid in top_candidate_ids
+                ]
+
+                reranked = reranker.rerank(query, candidates, top_k=k)
+
+                # Build result from reranked items
+                return RetrievalResult(
+                    chunks=[r.text for r in reranked],
+                    metadatas=[r.metadata for r in reranked],
+                    distances=[1.0 - r.rerank_score for r in reranked],  # Convert score to pseudo-distance
+                    ids=[r.chunk_id for r in reranked],
+                )
+
+        # No reranking - take top k by RRF score
+        top_k_ids = sorted_ids[:k]
 
         # Build result
         chunks = []
@@ -281,19 +420,56 @@ class RAGChain:
         distances = []
         ids = []
 
-        for chunk_id in sorted_ids:
+        for chunk_id in top_k_ids:
             data = chunk_data[chunk_id]
             ids.append(chunk_id)
             chunks.append(data["chunk"])
             metadatas.append(data["metadata"])
             # Use inverse RRF score as pseudo-distance (lower = better)
-            distances.append(1.0 / (chunk_scores[chunk_id] + 0.001))
+            distances.append(1.0 / (chunk_rrf_scores[chunk_id] + 0.001))
 
         return RetrievalResult(
             chunks=chunks,
             metadatas=metadatas,
             distances=distances,
             ids=ids,
+        )
+
+    def _apply_reranking(
+        self, query: str, result: RetrievalResult, k: int
+    ) -> RetrievalResult:
+        """Apply cross-encoder reranking to retrieval results.
+
+        Args:
+            query: User query.
+            result: Original retrieval result.
+            k: Number of results to return.
+
+        Returns:
+            Reranked retrieval result.
+        """
+        reranker = self._get_reranker()
+        if not reranker:
+            return result
+
+        # Prepare candidates for reranking
+        candidates = [
+            {
+                "chunk_id": result.ids[i],
+                "text": result.chunks[i],
+                "metadata": result.metadatas[i],
+                "score": result.distances[i],
+            }
+            for i in range(len(result.chunks))
+        ]
+
+        reranked = reranker.rerank(query, candidates, top_k=k)
+
+        return RetrievalResult(
+            chunks=[r.text for r in reranked],
+            metadatas=[r.metadata for r in reranked],
+            distances=[1.0 - r.rerank_score for r in reranked],  # Convert score to pseudo-distance
+            ids=[r.chunk_id for r in reranked],
         )
 
     def _format_context(self, retrieval: RetrievalResult) -> str:
