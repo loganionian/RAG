@@ -75,8 +75,8 @@ BASE_URL=https://your-llm-api-endpoint
 ```
 data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
     → [ingestion]  → data/processed/chunks/*.jsonl + manifest.json + failures.json + ingestion-report.json
-    → [indexing]   → data/vectorstore/ (Chroma)
-    → [query]      → Top-k semantic matches
+    → [indexing]   → data/vectorstore/ (Chroma + BM25)
+    → [query]      → Top-k matches (vector, lexical, or hybrid)
     → [generation] → LLM-powered answers with retrieved context
 ```
 
@@ -94,14 +94,16 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 
 **indexing/** - Vector database operations
 - `chroma_store.py`: Chroma persistence with cosine distance
+- `bm25_store.py`: `BM25Store` for persistent BM25 lexical index with pickle storage
+- `lexical_search.py`: `LexicalSearchService` wrapper for BM25 with RetrievalResult compatibility
 - `embeddings.py`: `EmbeddingService` with retry logic, `EmbeddingConfig`, `EmbeddingError`
 - `dataset.py`: Loads chunks from manifest/JSONL files
-- `pipeline.py`: `ChromaIndexingPipeline` handles batch embedding and upsert with failure tolerance
+- `pipeline.py`: `ChromaIndexingPipeline` handles batch embedding and upsert to Chroma + BM25
 - `summary_indexer.py`: `SummaryIndexer` for indexing dataset summaries in Chroma
 
 **generation/** - LLM-powered response generation
 - `api_client.py`: HMAC-authenticated LLM client with `LLMClient`, `LLMConfig`
-- `rag_chain.py`: `RAGChain` combines retrieval and generation
+- `rag_chain.py`: `RAGChain` combines retrieval (vector/lexical/hybrid) and generation
 - `dataset_summarizer.py`: `DatasetSummarizer` generates LLM summaries for tabular datasets
 - `cost_tracker.py`: `CostTracker` for token usage tracking and budget controls
 
@@ -133,6 +135,94 @@ data/raw/ (PDF, DOC, DOCX, XLSX, XLS, CSV, TSV, MD, TXT)
 - RAG retrieval: Top-5 chunks
 - LLM temperature: 0.7
 - LLM max tokens: 1000
+- BM25 k1: 1.5 (term frequency saturation)
+- BM25 b: 0.75 (length normalization)
+- Hybrid lexical weight: 0.3 (30% lexical, 70% vector in RRF fusion)
+
+### BM25 Lexical Search
+
+The indexing pipeline creates a BM25 lexical index alongside the Chroma vector index, enabling keyword-based search for queries where exact term matching is important (e.g., IDs, names, acronyms).
+
+**Architecture:**
+```
+Query → RAGChain.retrieve(mode="vector|lexical|hybrid")
+                    │
+        ┌───────────┼───────────┐
+        ▼           ▼           ▼
+    [Chroma]    [BM25Store]  [RRF Fusion]
+     vector      lexical       hybrid
+        │           │           │
+        └───────────┴───────────┘
+                    ▼
+              RetrievalResult
+```
+
+**Search Modes:**
+- `vector`: Semantic search using Chroma embeddings (default)
+- `lexical`: BM25 keyword search for exact term matching
+- `hybrid`: Combines both using Reciprocal Rank Fusion (RRF)
+
+**Index Location:** `data/vectorstore/bm25/{collection_name}.chunks.pkl`
+
+**CLI Usage:**
+```bash
+# BM25 is enabled by default during indexing
+python -m scripts.index_chunks --processed-dir data/processed --chroma-dir data/vectorstore --verbose
+
+# Query BM25 index directly
+python -m scripts.query_bm25 --question "WEF Future of Jobs 2025" --k 5 --pretty
+
+# Query with search mode via rag_chat (requires code changes or API)
+```
+
+**API Usage:**
+```bash
+# Vector search (default)
+curl -X POST http://localhost:8080/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What skills are in demand?", "k": 5}'
+
+# Lexical search (exact keyword matching)
+curl -X POST http://localhost:8080/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "WEF report 2025", "k": 5, "search_mode": "lexical"}'
+
+# Hybrid search (RRF fusion of vector + lexical)
+curl -X POST http://localhost:8080/api/query \
+  -H "Content-Type: application/json" \
+  -d '{"question": "skills in demand", "k": 5, "search_mode": "hybrid"}'
+```
+
+**When to Use Each Mode:**
+- **vector**: General questions, conceptual queries, paraphrased content
+- **lexical**: Exact names, IDs, acronyms, technical terms, report titles
+- **hybrid**: Best of both worlds, especially for mixed queries
+
+**Programmatic Usage:**
+```python
+from generation.rag_chain import RAGChain, RAGConfig
+
+# Enable lexical search in config
+config = RAGConfig(
+    vectorstore_dir=Path("data/vectorstore"),
+    enable_lexical=True,  # Required for lexical/hybrid modes
+    lexical_weight=0.3,   # Weight for lexical in hybrid mode (0-1)
+)
+
+chain = RAGChain(llm_client, config)
+
+# Use different search modes
+result = chain.retrieve("query", k=5, mode="vector")
+result = chain.retrieve("query", k=5, mode="lexical")
+result = chain.retrieve("query", k=5, mode="hybrid")
+
+# Or via query() method
+response = chain.query("question", search_mode="hybrid")
+```
+
+**BM25 Parameters:**
+- `k1` (default: 1.5): Controls term frequency saturation. Higher values give more weight to term frequency.
+- `b` (default: 0.75): Controls length normalization. 0 = no normalization, 1 = full normalization.
 
 ### Local Embedding Model (Offline/Corporate Environments)
 
@@ -608,8 +698,14 @@ LLM_PROVIDER=openai  # or: custom, anthropic, ollama
 ```bash
 curl -X POST http://localhost:8080/api/query \
   -H "Content-Type: application/json" \
-  -d '{"question": "What skills are in demand?", "k": 5}'
+  -d '{"question": "What skills are in demand?", "k": 5, "search_mode": "hybrid"}'
 ```
+
+Request parameters:
+- `question` (required): The question to ask
+- `k` (optional, default: 5): Number of chunks to retrieve
+- `agent_id` (optional): Agent ID for custom prompts
+- `search_mode` (optional, default: "vector"): Search mode - "vector", "lexical", or "hybrid"
 
 Response:
 ```json
@@ -626,7 +722,8 @@ Response:
   ],
   "metadata": {
     "retrieval_time_ms": 45.2,
-    "generation_time_ms": 1523.8
+    "generation_time_ms": 1523.8,
+    "search_mode": "hybrid"
   }
 }
 ```
@@ -667,6 +764,12 @@ Response:
     "healthy": true,
     "message": "OpenAI configured",
     "provider": "openai"
+  },
+  "bm25_index": {
+    "healthy": true,
+    "message": "BM25 index healthy. 590 chunks indexed.",
+    "document_count": 590,
+    "index_name": "pilot-docs"
   }
 }
 ```
@@ -708,6 +811,16 @@ HTTP Status Codes:
 - `503`: Service unavailable (RAG not initialized)
 
 ### Migration Notes
+
+#### BM25 Lexical Search (PR #123)
+- **New feature**: BM25 lexical index created alongside Chroma during indexing
+- **Backward compatibility**: Existing Chroma indexes continue to work; BM25 is additive
+- **To enable BM25**: Re-run the indexing pipeline to create the BM25 index:
+  ```bash
+  python -m scripts.index_chunks --processed-dir data/processed --chroma-dir data/vectorstore --verbose
+  ```
+- **API change**: New `search_mode` parameter in `/api/query` endpoint (defaults to "vector" for backward compatibility)
+- **New dependency**: `rank-bm25>=0.2.2` added to requirements.txt
 
 #### Chunk Metadata Indexing (PR #48)
 - **New metadata fields**: `page`, `section`, `timestamp` added to indexed chunks
