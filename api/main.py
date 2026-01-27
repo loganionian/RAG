@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routes import documents_router, ingest_router, query_router
+from api.routes import agents_router, documents_router, ingest_router, query_router
 from api.routes.query import set_rag_chain
 from api.schemas import ErrorResponse
 
@@ -79,6 +79,7 @@ app.add_middleware(
 )
 
 # Include routers
+app.include_router(agents_router)
 app.include_router(documents_router)
 app.include_router(query_router)
 app.include_router(ingest_router)

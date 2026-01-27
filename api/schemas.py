@@ -80,3 +80,84 @@ class ErrorResponse(BaseModel):
 
     detail: str = Field(..., description="Error message")
     error_type: str = Field(..., description="Error class name")
+
+
+# ============================================================================
+# Agent Schemas
+# ============================================================================
+
+
+class AgentBase(BaseModel):
+    """Base agent fields for create/update operations."""
+
+    name: str = Field(..., min_length=1, max_length=100, description="Unique agent name")
+    description: Optional[str] = Field(
+        default=None, max_length=500, description="Short description of the agent"
+    )
+    system_prompt: str = Field(
+        ...,
+        min_length=1,
+        description="System prompt template with {context} placeholder",
+    )
+    temperature: Optional[float] = Field(
+        default=None, ge=0.0, le=2.0, description="LLM temperature (0.0-2.0)"
+    )
+    max_tokens: Optional[int] = Field(
+        default=None, ge=1, le=32000, description="Maximum response tokens"
+    )
+
+
+class AgentCreate(AgentBase):
+    """Request model for creating a new agent."""
+
+    pass
+
+
+class AgentUpdate(BaseModel):
+    """Request model for updating an existing agent.
+
+    All fields are optional - only provided fields will be updated.
+    """
+
+    name: Optional[str] = Field(
+        default=None, min_length=1, max_length=100, description="New agent name"
+    )
+    description: Optional[str] = Field(
+        default=None, max_length=500, description="New description"
+    )
+    system_prompt: Optional[str] = Field(
+        default=None, min_length=1, description="New system prompt"
+    )
+    temperature: Optional[float] = Field(
+        default=None, ge=0.0, le=2.0, description="New temperature"
+    )
+    max_tokens: Optional[int] = Field(
+        default=None, ge=1, le=32000, description="New max tokens"
+    )
+
+
+class AgentResponse(BaseModel):
+    """Response model for a single agent."""
+
+    id: str = Field(..., description="Unique agent identifier")
+    name: str = Field(..., description="Agent name")
+    description: Optional[str] = Field(default=None, description="Agent description")
+    system_prompt: str = Field(..., description="System prompt template")
+    temperature: Optional[float] = Field(default=None, description="LLM temperature")
+    max_tokens: Optional[int] = Field(default=None, description="Max response tokens")
+    is_default: bool = Field(..., description="Whether this is the default agent")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class AgentsListResponse(BaseModel):
+    """Response model for listing agents."""
+
+    agents: list[AgentResponse] = Field(default_factory=list, description="List of agents")
+    total: int = Field(..., description="Total number of agents")
+
+
+class AgentDeleteResponse(BaseModel):
+    """Response model for agent deletion."""
+
+    deleted: bool = Field(..., description="Whether the agent was deleted")
